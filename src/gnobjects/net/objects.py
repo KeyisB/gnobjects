@@ -572,7 +572,6 @@ class TempDataObject:
                  payload: Union[SerializableType, FileObject],
                  cache: Optional[Union[CacheConfig, Dict[str, Any]]] = None,
                  cors: Optional[CORSObject] = None,
-                 method: Union[Literal['get', 'post', 'put', 'delete'], str] = 'get',
                  inType: Optional[Union[Literal['html', 'css', 'js', 'svg', 'png', 'py'], str]] = None
                  ) -> None:
         """
@@ -590,16 +589,15 @@ class TempDataObject:
 
         :param cache: Конфигурация кэширования `CacheConfig` или dict с конфигурацией кэширования
         :param cors: Конфигурация контроля доступа `CORSObject`
-        :param method: Метод запроса (`GET`, `POST`, `PUT`, `DELETE` и т.д.)
         :param inType: Тип интерпретатора. Оприделяет путь к интерпретатору. Например `js`, `html`, `py`. (как mime-type в http). Если payload `FileObject`, тип установиться автоматически по расширению файла.
         """
-        self.method = method
         self.dataType = dataType
         self.inType = inType
         self.path = path
         self.payload = payload
         self.cache: Optional[Union[CacheConfig, Dict[str, Any]]] = cache
         self.cors = cors
+        self.id: Optional[int] = None # abs_id
 
         self._cache_data: Optional[bytes] = None
         self._cors_data: Optional[bytes] = None
@@ -626,9 +624,9 @@ class TempDataObject:
         
         s = pack_temp_data_object(
             version=0,
+            abs_id=self.id,
             dataType=self.dataType,
             inType=self.inType,
-            method=self.method,
             path=self.path,
             payload=payload,
             cache=self._cache_data,
@@ -645,7 +643,6 @@ class TempDataObject:
         return TempDataObject(
             dataType=d['dataType'],
             inType=d['inType'],
-            method=d['method'],
             path=d['path'],
             payload=payload,
             cache=d['cache'],
