@@ -177,6 +177,14 @@ class AllGNFastCommands:
         """
         cls_command = "gn:transport"
 
+        @register_command(("transport", 'NoResponse'))
+        class NoResponse(GNFastCommand):
+            """
+            # Ответ не предусмотрен
+            Операция выполнена успешно, но ответ не требуется.
+            """
+            cls_command = "gn:transport:0"
+
         @register_command(("transport", 'NetworkUnreachable'))
         class NetworkUnreachable(GNFastCommand):
             """
@@ -314,7 +322,7 @@ class AllGNFastCommands:
         @register_command(("transport", 'ConnectionError'))
         class ConnectionError(GNFastCommand):
             """
-            # Неизвесная ошибка поключения
+            # Неизвесная ошибка подключения
             """
             cls_command = "gn:transport:16"
     

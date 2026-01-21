@@ -572,7 +572,8 @@ class TempDataObject:
                  payload: Union[SerializableType, FileObject],
                  cache: Optional[Union[CacheConfig, Dict[str, Any]]] = None,
                  cors: Optional[CORSObject] = None,
-                 inType: Optional[Union[Literal['html', 'css', 'js', 'svg', 'png', 'py'], str]] = None
+                 inType: Optional[Union[Literal['html', 'css', 'js', 'svg', 'png', 'py'], str]] = None,
+                 abs_id: Optional[int] = None
                  ) -> None:
         """
         # Временный объект данных
@@ -624,13 +625,13 @@ class TempDataObject:
         
         s = pack_temp_data_object(
             version=0,
-            abs_id=self.id,
             dataType=self.dataType,
             inType=self.inType,
             path=self.path,
             payload=payload,
             cache=self._cache_data,
-            cors=self._cors_data
+            cors=self._cors_data,
+            abs_id=self.id
         )
 
         return s
@@ -646,7 +647,8 @@ class TempDataObject:
             path=d['path'],
             payload=payload,
             cache=d['cache'],
-            cors=d['cors']
+            cors=d['cors'],
+            abs_id=d['abs_id'] if 'abs_id' in d else None
         )
 
 

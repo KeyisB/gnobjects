@@ -423,11 +423,11 @@ def pack_temp_data_object(
                     version: int,
                     dataType: str,
                     inType: Optional[str],
-                    method: str,
                     path: str,
                     payload: Optional[bytes],
                     cache: Optional[bytes],
-                    cors: Optional[bytes]
+                    cors: Optional[bytes],
+                    abs_id: Optional[Union[int, bytes]]
                  ) -> bytes:
 
     if version == 0:
@@ -435,11 +435,11 @@ def pack_temp_data_object(
             version,
             dataType,
             inType,
-            method,
             path,
             payload,
             cache,
-            cors
+            cors,
+            abs_id
         )
     else:
         raise ValueError('Unsupported version')
@@ -455,190 +455,7 @@ def unpack_temp_data_object(data: bytes) -> dict:
     else:
         raise ValueError('Unsupported version')
 
-
-
-def pack_temp_data_object_v0(
-                 version: int,
-                 dataType: str,
-                 inType: Optional[str],
-                 method: str,
-                 path: str,
-                 payload: Optional[bytes],
-                 cache: Optional[bytes],
-                 cors: Optional[bytes]
-                 ) -> bytes:
-    
-    if version < 0 or version > 3:
-        raise ValueError('Version must be between 0 and 3')
-    
-    blob = bytearray()
-
-    b0 = 0  # allways
-    # 7 - version # allways
-    # 6 - version # allways
-    # 5 - dataType # allways
-    # 4 - dataType # allways
-    # 3 - dataType # allways
-    # 2 - dataType # allways
-    # 1 - inType is base
-    # 0 - inType standard
-
-    # 1 and 0 == 11 - inType is None
-
-
-
-    b0 |= (version & 0x03) << 6
-
-    # dataType
-    _dt_int = common_gnrequest_dataTypes[dataType] # тут можем использовать 0. этот байт всегда есть
-    b0 |= (_dt_int & 0x0F) << 2
-
-    if inType is None:
-        b0 |= (1 << 1)
-        b0 |= (1 << 0)
-    elif inType == base_gnrequest_inType:
-        b0 |= (1 << 1)
-    elif inType in common_gnrequest_inTypes:
-        b0 |= (1 << 0)
-
-    blob.append(b0)
-
-    b1 = 0
-    # 7 - method is base
-    # 6 - method standard
-    # 5 - path is base
-    # 4 - has payload
-    # 3 - compressType standard value (reserved)
-    # 2 - compressType standard value (reserved)
-    # 1 - compressType standard value (reserved)
-    # 0 - compressType standard value (reserved)
-
-    
-
-    if method == base_gnrequest_method:
-        b1 |= (1 << 7)
-    elif method in common_gnrequest_methods:
-        b1 |= (1 << 6)
-    else:
-        raise ValueError(f"Unknown method: {method}")
-
-    if path == '/':
-        b1 |= (1 << 5)
-    
-    if payload is not None:
-        b1 |= (1 << 4)
-
-
-    blob.append(b1)
-
-
-    # теперь стандартные значения
-    if (
-        (inType is not None and ((b0 & 0b11) in (1,2)))  # inType присутствует и имеет стандарт/базу
-        or ((b1 >> 6) & 1)  # method стандартный
-            ): # если есть стандартные значения, добавляем байт [90%]
-        
-        if (inType is not None and ((b0 >> 0) & 1) == 1) and (((b1 >> 6) & 1) == 0): # если есть inType, но нет method, то весь байт идет на inType [80%]
-            # b2 - inType standard value
-            b2 = common_gnrequest_inTypes[inType]
-            blob.append(b2)
-
-        elif (((b1 >> 6) & 1) == 1) and (((b0 >> 0) & 1) == 0): # если есть method, но нет inType, то весь байт идет на method [5%]
-            # b2 - method standard value
-            b2 = common_gnrequest_methods[method]
-            blob.append(b2)
-
-        else: # если есть и метод и inType, то добавляем 2 байта. 2 на inType, второй на method [15%]
-            if inType is not None and inType != base_gnrequest_inType:
-                # b2 - inType standard value
-                b2 = common_gnrequest_inTypes[inType]
-                blob.append(b2)
-
-            # b2 - method standard value
-            b3 = common_gnrequest_methods[method]
-            blob.append(b3)
-
-
-
-    # lenghs of lenghs
-    b4 = 0
-    # 7 - # inType length type
-    # 6 - # inType length type
-    # 5 - # path length type
-    # 4 - # path length type
-    # 3 - # cache length size
-    # 2 - # cache length size
-    # 1 - # cors length size
-    # 0 - # cors length size
-
-
-
-    path_b = path.encode('utf-8')
-    
-    if inType is None:
-        inType_b = None
-    elif inType == base_gnrequest_inType:
-        inType_b = None              # base → без строки
-    elif inType in common_gnrequest_inTypes:
-        inType_b = None              # standard → без строки
-    else:
-        inType_b = inType.encode('utf-8')  # custom
-
-    def _set_length_type(b: int, length: int, shift: int) -> int:
-        if length <= 0xFF:
-            return b | (1 << shift)
-        elif length <= 0xFFFFF:
-            return b | (1 << (shift + 1))
-        elif length <= 0xFFFFFFF:
-            return b | (1 << shift) | (1 << (shift + 1))
-        else:
-            raise ValueError("Too long length")
-
-    # inType
-    if inType_b is not None:
-        b4 = _set_length_type(b4, len(inType_b), 6)
-    # path
-    b4 = _set_length_type(b4, len(path_b), 4)
-    # cache
-    if cache is not None:
-        b4 = _set_length_type(b4, len(cache), 2)
-    # cors
-    if cors is not None:
-        b4 = _set_length_type(b4, len(cors), 0)
-    blob.append(b4)
-
-
-
-
-    body = bytearray()
-    if inType_b is not None:
-        l1 = len(inType_b)
-        body.extend(l1.to_bytes(_len_encode_2_bit_short[(b4 >> 6) & 0b11], 'big', signed=False))
-        body.extend(inType_b)
-
-    if path != '/':
-        l1 = len(path_b)
-        body.extend(l1.to_bytes(_len_encode_2_bit_short[(b4 >> 4) & 0b11], 'big', signed=False))
-        body.extend(path_b)
-
-    if cache is not None:
-        cache_b = cache
-        l2 = len(cache_b)
-        body.extend(l2.to_bytes(_len_encode_2_bit_short[(b4 >> 2) & 0b11], 'big', signed=False))
-        body.extend(cache_b)
-    
-    if cors is not None:
-        cors_b = cors
-        l3 = len(cors_b)
-        body.extend(l3.to_bytes(_len_encode_2_bit_short[(b4 >> 0) & 0b11], 'big', signed=False))
-        body.extend(cors_b)
-    
-    if payload is not None:
-        body.extend(payload)
-
-    blob.extend(body)
-    return bytes(blob)
-
+ABS_ID_LEN = 32
 
 def _read_len_and_bytes(buf: bytes, pos: int, len_type_2bit: int) -> tuple[bytes, int]:
     n = _len_encode_2_bit_short[len_type_2bit]
@@ -652,11 +469,170 @@ def _read_len_and_bytes(buf: bytes, pos: int, len_type_2bit: int) -> tuple[bytes
     pos += ln
     return seg, pos
 
+def _set_length_type(b: int, length: int, shift: int) -> int:
+    """
+    2-bit type stored at [shift+1:shift] (but we set bits individually like in твоём коде):
+      00 -> absent (НЕ используем для present)
+      01 -> 1 byte length
+      10 -> 2 bytes length
+      11 -> 4 bytes length
+    """
+    if length <= 0xFF:
+        return b | (1 << shift)              # 01
+    elif length <= 0xFFFF:
+        return b | (1 << (shift + 1))        # 10
+    elif length <= 0xFFFFFFFF:
+        return b | (1 << shift) | (1 << (shift + 1))  # 11
+    else:
+        raise ValueError("Too long length")
+
+def _abs_id_to_bytes(abs_id: Union[int, bytes]) -> bytes:
+    if isinstance(abs_id, int):
+        if abs_id < 0:
+            raise ValueError("abs_id must be unsigned")
+        b = abs_id.to_bytes(ABS_ID_LEN, "big", signed=False)
+    else:
+        b = abs_id
+    if len(b) != ABS_ID_LEN:
+        raise ValueError("abs_id must be exactly 32 bytes")
+    return b
+
+def pack_temp_data_object_v0(
+    version: int,
+    dataType: str,
+    inType: Optional[str],
+    path: str,
+    payload: Optional[bytes],
+    cache: Optional[bytes],
+    cors: Optional[bytes],
+    abs_id: Optional[Union[int, bytes]],   # NEW (optional)
+) -> bytes:
+    if version < 0 or version > 3:
+        raise ValueError("Version must be between 0 and 3")
+
+    blob = bytearray()
+
+    # ========= b0 =========
+    # 7..6 version (2 bits)
+    # 5..2 dataType (4 bits)
+    # 1..0 inType mode:
+    #   11 -> None
+    #   10 -> base
+    #   01 -> standard (then 1 byte inType code follows)
+    #   00 -> custom (then len+bytes follows)
+    b0 = 0
+    b0 |= (version & 0x03) << 6
+
+    dt_code = common_gnrequest_dataTypes[dataType]  # must exist
+    b0 |= (dt_code & 0x0F) << 2
+
+    if inType is None:
+        b0 |= 0b11
+        inType_mode = "none"
+    elif inType == base_gnrequest_inType:
+        b0 |= 0b10
+        inType_mode = "base"
+    elif inType in common_gnrequest_inTypes:
+        b0 |= 0b01
+        inType_mode = "standard"
+    else:
+        # custom
+        # b0 |= 0b00
+        inType_mode = "custom"
+
+    blob.append(b0)
+
+    # ========= b1 =========
+    # 7..6 reserved (бывший method)
+    # 5 path is base ('/')
+    # 4 has payload
+    # 3 reserved
+    # 2 has abs_id (NEW)  <-- "3 с конца бит" == bit2
+    # 1 reserved
+    # 0 reserved
+    b1 = 0
+    if path == "/":
+        b1 |= (1 << 5)
+    if payload is not None:
+        b1 |= (1 << 4)
+    if abs_id is not None:
+        b1 |= (1 << 2)
+    blob.append(b1)
+
+    # ========= b2 (optional) =========
+    # only if inType_mode == "standard"
+    if inType_mode == "standard":
+        blob.append(common_gnrequest_inTypes[inType])  # 1 byte
+
+    # ========= b4: length types =========
+    # 7..6 inType length type (only if custom present)
+    # 5..4 path length type (always set even if '/'; body may omit actual bytes if '/')
+    # 3..2 cache length type (00 absent)
+    # 1..0 cors  length type (00 absent)
+    b4 = 0
+
+    path_b = path.encode("utf-8")
+
+    inType_b: Optional[bytes]
+    if inType_mode == "custom":
+        inType_b = inType.encode("utf-8")  # type: ignore[union-attr]
+        b4 = _set_length_type(b4, len(inType_b), 6)
+    else:
+        inType_b = None
+
+    # path len type (set always, like у тебя)
+    b4 = _set_length_type(b4, len(path_b), 4)
+
+    if cache is not None:
+        b4 = _set_length_type(b4, len(cache), 2)
+    if cors is not None:
+        b4 = _set_length_type(b4, len(cors), 0)
+
+    blob.append(b4)
+
+    # ========= abs_id bytes (fixed 32B, deterministic position) =========
+    if abs_id is not None:
+        blob.extend(_abs_id_to_bytes(abs_id))
+
+    # ========= body =========
+    body = bytearray()
+
+    # inType custom
+    if inType_b is not None:
+        ln = len(inType_b)
+        n = _len_encode_2_bit_short[(b4 >> 6) & 0b11]
+        body.extend(ln.to_bytes(n, "big", signed=False))
+        body.extend(inType_b)
+
+    # path (omit if '/')
+    if path != "/":
+        ln = len(path_b)
+        n = _len_encode_2_bit_short[(b4 >> 4) & 0b11]
+        body.extend(ln.to_bytes(n, "big", signed=False))
+        body.extend(path_b)
+
+    # cache
+    if cache is not None:
+        ln = len(cache)
+        n = _len_encode_2_bit_short[(b4 >> 2) & 0b11]
+        body.extend(ln.to_bytes(n, "big", signed=False))
+        body.extend(cache)
+
+    # cors
+    if cors is not None:
+        ln = len(cors)
+        n = _len_encode_2_bit_short[(b4 >> 0) & 0b11]
+        body.extend(ln.to_bytes(n, "big", signed=False))
+        body.extend(cors)
+
+    # payload (to end)
+    if payload is not None:
+        body.extend(payload)
+
+    blob.extend(body)
+    return bytes(blob)
+
 def unpack_temp_data_object_v0(data: bytes) -> dict:
-    """
-    Строго зеркальная распаковка к pack_temp_data_object_v0().
-    Однозначна и детерминирована.
-    """
     if len(data) < 3:
         raise ValueError("Too short")
 
@@ -666,81 +642,67 @@ def unpack_temp_data_object_v0(data: bytes) -> dict:
     b0 = data[pos]; pos += 1
     version = (b0 >> 6) & 0b11
     dataType_code = (b0 >> 2) & 0x0F
-    inType_bits = b0 & 0b11  # 10=base, 01=std, 11=None
+    inType_bits = b0 & 0b11
 
-    # inType_mode и значение
-        
+    try:
+        dataType = _rev_dataTypes[dataType_code]
+    except KeyError:
+        raise ValueError(f"Unknown dataType code: {dataType_code}")
+
     if inType_bits == 0b11:
         inType_mode = "none"
     elif inType_bits == 0b10:
         inType_mode = "base"
     elif inType_bits == 0b01:
         inType_mode = "standard"
-    elif inType_bits == 0b00:
+    else:  # 00
         inType_mode = "custom"
-    else:
-        raise ValueError("Invalid inType bits")
-
-    inType: Optional[str] = None  # инициализация для Pylance
-    # (значение установим позже, после b2/b3 и/или чтения строки)
-
-    # dataType
-    try:
-        dataType = _rev_dataTypes[dataType_code]
-    except KeyError:
-        raise ValueError(f"Unknown dataType code: {dataType_code}")
 
     # b1
     b1 = data[pos]; pos += 1
-    method_is_base = (b1 >> 7) & 1
-    method_is_std  = (b1 >> 6) & 1
-    path_is_base   = (b1 >> 5) & 1
-    has_payload    = (b1 >> 4) & 1
-    # b1 bits 3..0 зарезервированы под compressType (не используются здесь)
+    path_is_base = (b1 >> 5) & 1
+    has_payload  = (b1 >> 4) & 1
+    has_abs_id   = (b1 >> 2) & 1
 
-    # b2/b3 (std-значения inType/method) — строго по логике pack()
+    # b2 (optional) only for inType standard
     inType_std_val: Optional[int] = None
-    method_std_val: Optional[int] = None
+    if inType_mode == "standard":
+        if pos >= len(data):
+            raise ValueError("Missing inType std value")
+        inType_std_val = data[pos]; pos += 1
 
-    if ((inType_bits in (0b01, 0b10)) or method_is_std):
-        if (inType_bits == 0b01) and (not method_is_std):
-            # только inType std
-            inType_std_val = data[pos]; pos += 1
-        elif method_is_std and (inType_bits != 0b01):
-            # только method std
-            method_std_val = data[pos]; pos += 1
-        else:
-            # оба; либо method std при inType=None — см. pack(): сначала inType (если есть), затем method
-            if inType_bits == 0b01:
-                inType_std_val = data[pos]; pos += 1
-            method_std_val = data[pos]; pos += 1
-
-    # b4 (дескрипторы длин)
+    # b4
+    if pos >= len(data):
+        raise ValueError("Missing b4")
     b4 = data[pos]; pos += 1
     inType_len_type = (b4 >> 6) & 0b11
     path_len_type   = (b4 >> 4) & 0b11
     cache_len_type  = (b4 >> 2) & 0b11
     cors_len_type   = (b4 >> 0) & 0b11
 
-    # === тело ===
+    # abs_id fixed 32B
+    abs_id: Optional[int] = None
+    if has_abs_id:
+        if pos + ABS_ID_LEN > len(data):
+            raise ValueError("Truncated abs_id")
+        abs_id_bytes = data[pos:pos + ABS_ID_LEN]
+        pos += ABS_ID_LEN
+        abs_id = int.from_bytes(abs_id_bytes, "big", signed=False)
 
-    # inType
+    # inType resolve
     if inType_mode == "none":
-        inType = None
+        inType: Optional[str] = None
     elif inType_mode == "base":
         inType = base_gnrequest_inType
     elif inType_mode == "standard":
-        if inType_std_val is None:
-            raise ValueError("Missing inType std value")
+        assert inType_std_val is not None
         try:
             inType = _rev_inTypes[inType_std_val]
         except KeyError:
             raise ValueError(f"Unknown inType std code: {inType_std_val}")
-    elif inType_mode == "custom":
+    else:  # custom
         seg, pos = _read_len_and_bytes(data, pos, inType_len_type)
         inType = seg.decode("utf-8")
-    else:
-        raise ValueError("Impossible inType_mode")  # защитный
 
     # path
     if path_is_base:
@@ -749,52 +711,33 @@ def unpack_temp_data_object_v0(data: bytes) -> dict:
         seg, pos = _read_len_and_bytes(data, pos, path_len_type)
         path = seg.decode("utf-8")
 
-    # ВНИМАНИЕ по cache/cors:
-    # Детект присутствия делаем ТОЛЬКО по b4 (len_type != 0 → поле присутствует).
-    # Это детерминированно и не съедает payload.
+    # cache/cors presence: only if len_type != 0
     cache: Optional[bytes] = None
-    cors:  Optional[bytes] = None
+    cors: Optional[bytes] = None
 
     if cache_len_type != 0:
         seg, pos = _read_len_and_bytes(data, pos, cache_len_type)
         cache = seg
-
     if cors_len_type != 0:
         seg, pos = _read_len_and_bytes(data, pos, cors_len_type)
         cors = seg
 
-    # payload
+    # payload: rest
     payload: Optional[bytes] = None
     if has_payload:
         payload = data[pos:] if pos < len(data) else b""
         pos = len(data)
 
-    # method
-    if method_is_base:
-        method = base_gnrequest_method
-    elif method_is_std:
-        if method_std_val is None:
-            raise ValueError("Missing method std value")
-        try:
-            method = _rev_methods[method_std_val]
-        except KeyError:
-            raise ValueError(f"Unknown method std code: {method_std_val}")
-    else:
-        raise ValueError("Invalid method flags")
-
-    # финал
     return {
         "version": version,
         "dataType": dataType,
         "inType": inType,
-        "method": method,
         "path": path,
         "payload": payload,
         "cache": cache,
         "cors": cors,
+        "abs_id": abs_id,
     }
-
-
 def _read_len(buf: bytes, pos: int, len_type: int) -> tuple[int, int]:
     n = _len_encode_2_bit_short[len_type]
     if n == 0:
