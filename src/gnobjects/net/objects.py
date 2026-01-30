@@ -1206,12 +1206,12 @@ class GNRequest:
         """
         # Маршрут запроса.
 
-        :param route: Маршрут запроса (например, `gn:net`).
+        :param route: Маршрут запроса (например, `gn:net` или `api`).
 
-        Если не указан, используется `gn:net`.
+        Если не указан, используется `api`.
         """
         if route is None:
-            route = 'gn:net'
+            route = 'api'
         self._route = route
 
 
