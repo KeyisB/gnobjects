@@ -1103,7 +1103,7 @@ class GNRequest:
         """
         # Метод запроса
 
-        GET, POST, PUT, DELETE и т.д.
+        get, post, put, delete и т.д.
         """
         return self._method
     
@@ -1111,7 +1111,7 @@ class GNRequest:
         """
         # Метод запроса
         
-        :param method: Метод запроса (GET, POST, PUT, DELETE и т.д.)
+        :param method: Метод запроса (get, post, put, delete и т.д.)
         """
         self._method = method
     

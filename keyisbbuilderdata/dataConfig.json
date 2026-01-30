@@ -2,6 +2,8 @@
     "requirements": [
         "cryptography",
         "msgpack",
-        "pycryptodome"
+        "pycryptodome",
+        "anyio",
+        "zstandard"
     ]
 }
