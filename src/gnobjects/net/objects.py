@@ -515,7 +515,7 @@ class CacheConfig:
         return serialize(self.cache_config)
 
 
-async def pack_payload(payload: Union[SerializableType, FileObject, 'TempDataObject', 'TempDataGroup']) -> Tuple[Optional[bytes], Optional[str]]:
+async def pack_payload(payload: Union[SerializableType, FileObject, 'TempDataObject', 'TempDataGroup', 'GNRequest', 'GNResponse']) -> Tuple[Optional[bytes], Optional[str]]:
     if payload is None:
         return (None, None)
     
@@ -535,6 +535,13 @@ async def pack_payload(payload: Union[SerializableType, FileObject, 'TempDataObj
     elif isinstance(payload, FileObject):
         spayload, inType = await payload.assembly()
         payload_type = 4
+    elif isinstance(payload, GNRequest):
+        spayload = await payload.serialize()
+        payload_type = 5
+    elif isinstance(payload, GNResponse):
+        await payload.assembly()
+        spayload = payload.serialize()
+        payload_type = 6
     else:
         spayload = serialize(payload)
         payload_type = 1
@@ -543,7 +550,7 @@ async def pack_payload(payload: Union[SerializableType, FileObject, 'TempDataObj
     
     
 
-def unpack_payload(p: Optional[bytes], inType: Optional[str] = None) -> Optional[Union[SerializableType, FileObject, 'TempDataObject', 'TempDataGroup']]:
+def unpack_payload(p: Optional[bytes], inType: Optional[str] = None) -> Optional[Union[SerializableType, FileObject, 'TempDataObject', 'TempDataGroup', 'GNRequest', 'GNResponse']]:
     if p is None:
         return None
     
@@ -560,6 +567,10 @@ def unpack_payload(p: Optional[bytes], inType: Optional[str] = None) -> Optional
         rp = TempDataGroup.deserialize(p)
     elif pt == 4:
         rp = FileObject.deserialize(p, cast(str, inType))
+    elif pt == 5:
+        rp = GNRequest.deserialize(p)
+    elif pt == 6:
+        rp = GNResponse.deserialize(p)
     else:
         return None
 
