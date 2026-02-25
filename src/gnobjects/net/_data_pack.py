@@ -13,9 +13,22 @@ from .values import (common_gnrequest_transports,
                      base_gnrequest_route,
                      common_gnrequest_dataTypes,
                      base_gnrequest_inType,
-                     common_gnrequest_inTypes,
-                     common_gnrequest_compressTypes
+                     common_inTypes,
+                     common_gnrequest_compressTypes,
+                     common_inTypes_compression_support
                      )
+
+
+from ._data_pack_f import (
+    encode_varlen_1248,
+    encode_varlen_2358,
+    decode_varlen_1248,
+    decode_varlen_2358,
+    encode_data_with_len,
+    decode_data_with_len,
+    pack_byte_1_1_4_2,
+    unpack_byte_1_1_4_2
+)
 
 
 _len_encode_2_bit = (1, 2, 4, 8)
@@ -27,9 +40,41 @@ _len_encode_2_bit_short = {
 }
 
 
+def decode_varlen_2358_2(buf: bytes, pos: int) -> Tuple[int, int]:
+    """Декодирует varlen (возвращает length, new_pos). С защитой от усечения."""
+    if pos >= len(buf):
+        raise ValueError("Truncated buffer (no first byte)")
+    first = buf[pos]
+    prefix = (first >> 6) & 0b11
+    if prefix == 0b00:
+        nbytes = 2
+        if pos + nbytes > len(buf):
+            raise ValueError("Truncated varlen (need 2 bytes)")
+        raw = int.from_bytes(buf[pos:pos + nbytes], "big")
+        length = raw & ((1 << 14) - 1)
+    elif prefix == 0b01:
+        nbytes = 3
+        if pos + nbytes > len(buf):
+            raise ValueError("Truncated varlen (need 3 bytes)")
+        raw = int.from_bytes(buf[pos:pos + nbytes], "big")
+        length = raw & ((1 << 22) - 1)
+    elif prefix == 0b10:
+        nbytes = 5
+        if pos + nbytes > len(buf):
+            raise ValueError("Truncated varlen (need 5 bytes)")
+        raw = int.from_bytes(buf[pos:pos + nbytes], "big")
+        length = raw & ((1 << 38) - 1)
+    else:
+        nbytes = 8
+        if pos + nbytes > len(buf):
+            raise ValueError("Truncated varlen (need 8 bytes)")
+        raw = int.from_bytes(buf[pos:pos + nbytes], "big")
+        length = raw & ((1 << 62) - 1)
+    return length, pos + nbytes
+
 
 _rev_dataTypes: Dict[int, str] = {v: k for k, v in common_gnrequest_dataTypes.items()}
-_rev_inTypes:   Dict[int, str] = {v: k for k, v in common_gnrequest_inTypes.items()}
+_rev_inTypes:   Dict[int, str] = {v: k for k, v in common_inTypes.items()}
 _rev_methods:   Dict[int, str] = {v: k for k, v in common_gnrequest_methods.items()}
 
 
@@ -532,7 +577,7 @@ def pack_temp_data_object_v0(
     elif inType == base_gnrequest_inType:
         b0 |= 0b10
         inType_mode = "base"
-    elif inType in common_gnrequest_inTypes:
+    elif inType in common_inTypes:
         b0 |= 0b01
         inType_mode = "standard"
     else:
@@ -562,7 +607,7 @@ def pack_temp_data_object_v0(
     # ========= b2 (optional) =========
     # only if inType_mode == "standard"
     if inType_mode == "standard":
-        blob.append(common_gnrequest_inTypes[inType])  # 1 byte
+        blob.append(common_inTypes[inType])  # 1 byte
 
     # ========= b4: length types =========
     # 7..6 inType length type (only if custom present)
@@ -934,63 +979,6 @@ def unpack_temp_data_group(data: bytes) -> dict:
     else:
         raise ValueError('Unsupported version')
 
-
-
-def __encode_varlen_length(length: int) -> bytes:
-    """Кодирует длину: 2–8 байт с префиксом из 2 бит."""
-    if length < (1 << 14):
-        # 00 — 2 байта
-        v = (0b00 << 14) | length
-        return v.to_bytes(2, "big")
-    elif length < (1 << 22):
-        # 01 — 3 байта
-        v = (0b01 << 22) | length
-        return v.to_bytes(3, "big")
-    elif length < (1 << 38):
-        # 10 — 5 байт
-        v = (0b10 << 38) | length
-        return v.to_bytes(5, "big")
-    elif length < (1 << 62):
-        # 11 — 8 байт
-        v = (0b11 << 62) | length
-        return v.to_bytes(8, "big")
-    else:
-        raise ValueError("Length too large")
-
-
-def __decode_varlen_length(buf: bytes, pos: int) -> Tuple[int, int]:
-    """Декодирует varlen (возвращает length, new_pos). С защитой от усечения."""
-    if pos >= len(buf):
-        raise ValueError("Truncated buffer (no first byte)")
-    first = buf[pos]
-    prefix = (first >> 6) & 0b11
-    if prefix == 0b00:
-        nbytes = 2
-        if pos + nbytes > len(buf):
-            raise ValueError("Truncated varlen (need 2 bytes)")
-        raw = int.from_bytes(buf[pos:pos + nbytes], "big")
-        length = raw & ((1 << 14) - 1)
-    elif prefix == 0b01:
-        nbytes = 3
-        if pos + nbytes > len(buf):
-            raise ValueError("Truncated varlen (need 3 bytes)")
-        raw = int.from_bytes(buf[pos:pos + nbytes], "big")
-        length = raw & ((1 << 22) - 1)
-    elif prefix == 0b10:
-        nbytes = 5
-        if pos + nbytes > len(buf):
-            raise ValueError("Truncated varlen (need 5 bytes)")
-        raw = int.from_bytes(buf[pos:pos + nbytes], "big")
-        length = raw & ((1 << 38) - 1)
-    else:
-        nbytes = 8
-        if pos + nbytes > len(buf):
-            raise ValueError("Truncated varlen (need 8 bytes)")
-        raw = int.from_bytes(buf[pos:pos + nbytes], "big")
-        length = raw & ((1 << 62) - 1)
-    return length, pos + nbytes
-
-
 def pack_temp_data_group_v0(version: int, path: str, payload: List[bytes]) -> bytes:
     if not (0 <= version <= 3):
         raise ValueError("Version must be between 0 and 3")
@@ -1016,7 +1004,7 @@ def pack_temp_data_group_v0(version: int, path: str, payload: List[bytes]) -> by
 
     # items
     for p in payload:
-        blob.extend(__encode_varlen_length(len(p)))
+        blob.extend(__encode_varlen_2358(len(p)))
         blob.extend(p)
 
     return bytes(blob)
@@ -1045,7 +1033,7 @@ def unpack_temp_data_group_v0(data: bytes) -> dict:
     payloads = []
 
     for _ in range(n_items):
-        length, pos = __decode_varlen_length(data, pos)
+        length, pos = decode_varlen_2358_2(data, pos)
         if pos + length > len(data):
             raise ValueError("Truncated item data")
         payloads.append(data[pos:pos + length])
@@ -1332,3 +1320,152 @@ def unpack_gnresponse_v0(buf: bytes) -> dict:
         raise ValueError("Trailing bytes")
     return res
 # ===== GNResponse =====
+
+
+
+"""
+interpretable object:
+
+container type:
+0 - None
+1 - itp (interpretable type)
+
+
+[XB header
+    [2B container type]
+    [2B interpretator type
+        0 - None
+        1 - uncommon type
+        2-65536 - standard type (code in interpretator table)
+    ]
+    if b2:3 == 1: # if uncommon type
+        [XB]
+    [1B compression options
+        [1b compression (0 - no, 1 - yes)]
+        [1b used pretrained map (0 - no, 1 - yes)]
+        [4b compression algorithm (0 - zstd, ...) (0...15)]
+        [2b compression level (0...3)]
+    ]
+]
+
+"""
+
+
+_Mode = Union[Literal['itp'], str]
+
+class Container:
+    _cctx_dict = {
+        0: zstd.ZstdCompressor(level=1),
+        1: zstd.ZstdCompressor(level=6),
+        2: zstd.ZstdCompressor(level=9),
+        3: zstd.ZstdCompressor(level=19)
+    }
+    _dc = zstd.ZstdDecompressor()
+
+    @staticmethod
+    def decode(data: bytes) -> bytes:
+        _type = int.from_bytes(data[0:2], "big")
+        if _type != 1:
+            raise NotImplementedError(f"Unsupported container type: {_type}")
+
+
+
+    @staticmethod
+    def _compress_object(data: bytes, on: int, use_map: int, alg: int, l: int):
+        if on == 0:
+            return data
+        
+        if use_map:
+            raise NotImplementedError("Pretrained map compression not implemented")
+        
+        if alg != 0:
+            raise NotImplementedError(f"Unknown compression algorithm code: {alg}")
+        
+        c = Container._cctx_dict.get(l)
+
+        if c is None:
+            raise ValueError(f"Unknown compression level code: {l}. Supported levels: 0-3")
+        
+        return c.compress(data)
+        
+    @staticmethod
+    def _decompress_object(data: bytes, on: int, use_map: int, alg: int, l: int):
+        if on == 0:
+            return data
+        
+        if use_map:
+            raise NotImplementedError("Pretrained map decompression not implemented")
+        
+        if alg != 0:
+            raise NotImplementedError(f"Unknown compression algorithm code: {alg}")
+        
+        
+        try:
+            return Container._dc.decompress(data)
+        except zstd.ZstdError as e:
+            raise ValueError(f"Decompression failed: {e}")
+
+    @staticmethod
+    def encode_itp(data: bytes, interpretatorType: Union[int, str]) -> bytes:
+        head = bytearray()
+        head.extend((1).to_bytes(2, "big"))  # container type: itp
+
+        if not isinstance(interpretatorType, int):
+            if interpretatorType in common_inTypes:
+                interpretatorType = common_inTypes[interpretatorType]
+                head.extend(interpretatorType.to_bytes(2, "big"))  # interpretator type
+            else:
+                # uncommon type
+                head.extend((1).to_bytes(2, "big"))  # interpretator type: uncommon
+                _d = encode_data_with_len(interpretatorType.encode("utf-8"), '1248')
+                head.extend(_d)
+        else:
+            if interpretatorType < 2 or interpretatorType > 65536:
+                raise ValueError("interpretatorType int code must be in range [2..65536]")
+            head.extend(interpretatorType.to_bytes(2, "big"))  # interpretator type
+        
+
+        if interpretatorType in common_inTypes_compression_support:
+            compression_support = common_inTypes_compression_support.get(interpretatorType, (0, 0, 0, 0))
+            head.extend(bytes(compression_support))
+
+            payload = Container._compress_object(data, *compression_support)
+        else:
+            head.extend(bytes([0]))  # no compression support info
+            payload = data
+
+        return bytes(head) + payload
+    
+    @staticmethod
+    def decode_itp(data: bytes) -> Tuple[bytes, Optional[Union[int, str]]]:
+        if len(data) < 4:
+            raise ValueError("Data too short for container header")
+        container_type = int.from_bytes(data[0:2], "big")
+        if container_type != 1:
+            raise ValueError(f"Unsupported container type: {container_type}")
+        interpretator_type = int.from_bytes(data[2:4], "big")
+
+        if interpretator_type == 0:
+            return b'', None
+        elif interpretator_type == 1:
+            d_, _end = decode_data_with_len(data[4:], '1248')
+
+            interpretatorType = d_.decode('utf-8')
+            other_data = data[_end:]
+
+        else:
+            if interpretator_type in _rev_inTypes:
+                interpretatorType = _rev_inTypes[interpretator_type]
+                other_data = data[4:]
+            else:
+                raise ValueError(f"Unknown standard interpretator code: {interpretator_type}")
+
+        compression_support_byte = other_data[0]
+        payload_comp = other_data[1:]
+
+        payload = Container._decompress_object(payload_comp, *unpack_byte_1_1_4_2(compression_support_byte))
+
+        return payload, interpretatorType
+
+
+

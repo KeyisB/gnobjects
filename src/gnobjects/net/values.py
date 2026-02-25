@@ -57,15 +57,6 @@ common_gnrequest_compressTypes = { # max 16
 
 base_gnrequest_inType = None
 
-common_gnrequest_inTypes = { # max 256
-    'html': 0,
-    'css': 1,
-    'js': 2,
-    'svg': 3,
-    'png': 4,
-    'py': 5
-}
-
 
 tablex_legacy_mime_type_to_inType = {
     'text/html': 'html',
@@ -102,6 +93,33 @@ tablex_dataTypes_to_transportObject = {
 }
 
 
+common_inTypes = { # max 256
+    'html': 0,
+    'css': 1,
+    'js': 2,
+    'svg': 3,
+    'png': 4,
+    'py': 5
+}
+
+
 # legacy
 from ..gwis.values import tablex_gwis_object_types_int_to_str as _tablex_gwis_object_types_int_to_str
 tablex_gwiso_type_int_to_str = _tablex_gwis_object_types_int_to_str
+
+
+
+
+"""
+# TODO
+<1 interpretable type>:<2 level interpretable type>:...
+
+<interpretable type>/<specification> - like 'png/mini' or 'html/'
+
+"""
+
+common_inTypes_compression_support = {
+    0: (1, 0, 0, 1),
+    1: (1, 0, 0, 1),
+    2: (1, 0, 0, 1),
+}

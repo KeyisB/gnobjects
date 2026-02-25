@@ -1429,3 +1429,10 @@ class CommandObject(AllGNFastCommands):
                 return True
             return self.value
         return self.value
+
+
+
+
+
+
+
