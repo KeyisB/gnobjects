@@ -161,3 +161,20 @@ def unpack_byte_1_1_4_2(x: int) -> tuple[int, int, int, int]:
     d = x & 0b11
 
     return a, b, c, d
+
+def pack_byte_1_7(a: int, b: int) -> int:
+    if not (0 <= a < 2):
+        raise ValueError("a must be 0..1")
+    if not (0 <= b < 128):
+        raise ValueError("b must be 0..127")
+
+    return (a << 7) | b
+
+def unpack_byte_1_7(x: int) -> tuple[int, int]:
+    if not (0 <= x < 256):
+        raise ValueError("x must be 0..255")
+
+    a = (x >> 7) & 0b1
+    b = x & 0b1111111
+
+    return a, b

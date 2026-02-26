@@ -27,7 +27,9 @@ from ._data_pack_f import (
     encode_data_with_len,
     decode_data_with_len,
     pack_byte_1_1_4_2,
-    unpack_byte_1_1_4_2
+    unpack_byte_1_1_4_2,
+    pack_byte_1_7,
+    unpack_byte_1_7
 )
 
 
@@ -1340,6 +1342,7 @@ container type:
     ]
     if b2:3 == 1: # if uncommon type
         [XB]
+    [1-8B varlen interpretator version (2358)]
     [1B compression options
         [1b compression (0 - no, 1 - yes)]
         [1b used pretrained map (0 - no, 1 - yes)]
@@ -1406,10 +1409,11 @@ class Container:
             raise ValueError(f"Decompression failed: {e}")
 
     @staticmethod
-    def encode_itp(data: bytes, interpretatorType: Union[int, str]) -> bytes:
+    def encode_itp(data: bytes, interpretatorType: Union[int, str], interpretatorVersion: int = 1) -> bytes:
         head = bytearray()
         head.extend((1).to_bytes(2, "big"))  # container type: itp
 
+        # interpretator
         if not isinstance(interpretatorType, int):
             if interpretatorType in common_inTypes:
                 interpretatorType = common_inTypes[interpretatorType]
@@ -1423,8 +1427,12 @@ class Container:
             if interpretatorType < 2 or interpretatorType > 65536:
                 raise ValueError("interpretatorType int code must be in range [2..65536]")
             head.extend(interpretatorType.to_bytes(2, "big"))  # interpretator type
-        
 
+        # interpretator version
+        a = encode_varlen_2358(interpretatorVersion)
+        head.extend(a)
+        
+        # compression
         if interpretatorType in common_inTypes_compression_support:
             compression_support = common_inTypes_compression_support.get(interpretatorType, (0, 0, 0, 0))
             head.extend(bytes(compression_support))
@@ -1437,16 +1445,19 @@ class Container:
         return bytes(head) + payload
     
     @staticmethod
-    def decode_itp(data: bytes) -> Tuple[bytes, Optional[Union[int, str]]]:
+    def decode_itp(data: bytes) -> Optional[dict]:
         if len(data) < 4:
             raise ValueError("Data too short for container header")
         container_type = int.from_bytes(data[0:2], "big")
         if container_type != 1:
             raise ValueError(f"Unsupported container type: {container_type}")
+        
+        
+        # interpretator
         interpretator_type = int.from_bytes(data[2:4], "big")
 
         if interpretator_type == 0:
-            return b'', None
+            return None
         elif interpretator_type == 1:
             d_, _end = decode_data_with_len(data[4:], '1248')
 
@@ -1460,12 +1471,21 @@ class Container:
             else:
                 raise ValueError(f"Unknown standard interpretator code: {interpretator_type}")
 
+        # interpretator version
+
+        version, _end = decode_varlen_2358(other_data)
+        other_data = other_data[_end:]
+
         compression_support_byte = other_data[0]
         payload_comp = other_data[1:]
 
         payload = Container._decompress_object(payload_comp, *unpack_byte_1_1_4_2(compression_support_byte))
 
-        return payload, interpretatorType
+        return {
+            'interpretatorType': interpretatorType,
+            'interpretatorVersion': version,
+            'payload': payload
+        }
 
 
 
