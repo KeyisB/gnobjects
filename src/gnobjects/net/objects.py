@@ -1,7 +1,7 @@
 import re
 import os
 import ast
-from typing import Optional, Dict, Any, List, Union, Literal, Tuple, cast, overload, Type
+from typing import Optional, Dict, Any, List, Union, Literal, Tuple, cast, overload
 import anyio
 from KeyisBTools.models.serialization import serialize, deserialize, SerializableType
 
@@ -10,14 +10,12 @@ from .gnTransportProtocolParser import GNTransportProtocol, parse_gn_protocol
 
 from .values import tablex_file_extension_to_inType
 from ._data_pack import (
-    pack_temp_data_object,
     pack_gnrequest,
     unpack_gnrequest,
-    unpack_temp_data_object,
-    pack_temp_data_group,
-    unpack_temp_data_group,
     pack_gnresponse,
-    unpack_gnresponse
+    unpack_gnresponse,
+
+    _Aracada_container_packer
     )
 
 
@@ -515,7 +513,7 @@ class CacheConfig:
         return serialize(self.cache_config)
 
 
-async def pack_payload(payload: Union[SerializableType, FileObject, 'TempDataObject', 'TempDataGroup', 'GNRequest', 'GNResponse']) -> Tuple[Optional[bytes], Optional[str]]:
+async def pack_payload(payload: Union[SerializableType, FileObject, 'TempDataObject', 'GNRequest', 'GNResponse']) -> Tuple[Optional[bytes], Optional[str]]:
     if payload is None:
         return (None, None)
     
@@ -528,10 +526,6 @@ async def pack_payload(payload: Union[SerializableType, FileObject, 'TempDataObj
         payload.assemble()
         spayload = await payload.serialize()
         payload_type = 2
-    elif isinstance(payload, TempDataGroup):
-        await payload.assemble()
-        spayload = payload.serialize()
-        payload_type = 3
     elif isinstance(payload, FileObject):
         spayload, inType = await payload.assembly()
         payload_type = 4
@@ -550,7 +544,7 @@ async def pack_payload(payload: Union[SerializableType, FileObject, 'TempDataObj
     
     
 
-def unpack_payload(p: Optional[bytes], inType: Optional[str] = None) -> Optional[Union[SerializableType, FileObject, 'TempDataObject', 'TempDataGroup', 'GNRequest', 'GNResponse']]:
+def unpack_payload(p: Optional[bytes], inType: Optional[str] = None) -> Optional[Union[SerializableType, FileObject, 'TempDataObject', 'GNRequest', 'GNResponse']]:
     if p is None:
         return None
     
@@ -563,8 +557,6 @@ def unpack_payload(p: Optional[bytes], inType: Optional[str] = None) -> Optional
         rp = deserialize(p)
     elif pt == 2:
         rp = TempDataObject.deserialize(p)
-    elif pt == 3:
-        rp = TempDataGroup.deserialize(p)
     elif pt == 4:
         rp = FileObject.deserialize(p, cast(str, inType))
     elif pt == 5:
@@ -576,149 +568,149 @@ def unpack_payload(p: Optional[bytes], inType: Optional[str] = None) -> Optional
 
     return rp
 
-class TempDataObject:
-    def __init__(self,
-                 dataType: Literal['api', 'static', 'img', 'fat'],
-                 path: str,
-                 payload: Union[SerializableType, FileObject],
-                 cache: Optional[Union[CacheConfig, Dict[str, Any]]] = None,
-                 cors: Optional[CORSObject] = None,
-                 inType: Optional[Union[Literal['html', 'css', 'js', 'svg', 'png', 'py'], str]] = None,
-                 abs_id: Optional[int] = None
-                 ) -> None:
-        """
-        # Временный объект данных
+# class TempDataObject:
+#     def __init__(self,
+#                  dataType: Literal['api', 'static', 'img', 'fat'],
+#                  path: str,
+#                  payload: Union[SerializableType, FileObject],
+#                  cache: Optional[Union[CacheConfig, Dict[str, Any]]] = None,
+#                  cors: Optional[CORSObject] = None,
+#                  inType: Optional[Union[Literal['html', 'css', 'js', 'svg', 'png', 'py'], str]] = None,
+#                  abs_id: Optional[int] = None
+#                  ) -> None:
+#         """
+#         # Временный объект данных
 
-        :param dataType: Тип данных (api, static, img, fat)
+#         :param dataType: Тип данных (api, static, img, fat)
 
-            - `api` - Обычно некешируемые, уникальные для пользователя и ситуации данные. `RAM кеш`.
-            - `static` - Кешируемые данные, которые редко меняются (например, `html`, `css`, `js` коды страниц, конфигурационные файлы и другие статические ресурсы <32MB). `RAM кеш`.
-            - `img`  - любые объекты интерфейса. Картинки, шрифты и тд. То что не является приоритетом при загрузке.`RAM/SSD кеш`.
-            - `fat` - Большие данные (например, видео, аудио, большие файлы. >32MB). Видео, файлы, документы и тд. `SSD/HDD кеш`.
+#             - `api` - Обычно некешируемые, уникальные для пользователя и ситуации данные. `RAM кеш`.
+#             - `static` - Кешируемые данные, которые редко меняются (например, `html`, `css`, `js` коды страниц, конфигурационные файлы и другие статические ресурсы <32MB). `RAM кеш`.
+#             - `img`  - любые объекты интерфейса. Картинки, шрифты и тд. То что не является приоритетом при загрузке.`RAM/SSD кеш`.
+#             - `fat` - Большие данные (например, видео, аудио, большие файлы. >32MB). Видео, файлы, документы и тд. `SSD/HDD кеш`.
 
-        :param path: Путь к данным
-        :param payload: Полезная нагрузка (данные). Любой сериализуемый тип данных или объект `FileObject`
+#         :param path: Путь к данным
+#         :param payload: Полезная нагрузка (данные). Любой сериализуемый тип данных или объект `FileObject`
 
-        :param cache: Конфигурация кэширования `CacheConfig` или dict с конфигурацией кэширования
-        :param cors: Конфигурация контроля доступа `CORSObject`
-        :param inType: Тип интерпретатора. Оприделяет путь к интерпретатору. Например `js`, `html`, `py`. (как mime-type в http). Если payload `FileObject`, тип установиться автоматически по расширению файла.
-        """
-        self.dataType = dataType
-        self.inType = inType
-        self.path = path
-        self.payload = payload
-        self.cache: Optional[Union[CacheConfig, Dict[str, Any]]] = cache
-        self.cors = cors
-        self.id: Optional[int] = None # abs_id
+#         :param cache: Конфигурация кэширования `CacheConfig` или dict с конфигурацией кэширования
+#         :param cors: Конфигурация контроля доступа `CORSObject`
+#         :param inType: Тип интерпретатора. Оприделяет путь к интерпретатору. Например `js`, `html`, `py`. (как mime-type в http). Если payload `FileObject`, тип установиться автоматически по расширению файла.
+#         """
+#         self.dataType = dataType
+#         self.inType = inType
+#         self.path = path
+#         self.payload = payload
+#         self.cache: Optional[Union[CacheConfig, Dict[str, Any]]] = cache
+#         self.cors = cors
+#         self.id: Optional[int] = None # abs_id
 
-        self._cache_data: Optional[bytes] = None
-        self._cors_data: Optional[bytes] = None
+#         self._cache_data: Optional[bytes] = None
+#         self._cors_data: Optional[bytes] = None
 
-        self.assemble()
+#         self.assemble()
 
-    def assemble(self):
-        if self.cache is not None:
-            if isinstance(self.cache, CacheConfig):
-                self._cache_data = self.cache.serialize()
-            else:
-                self._cache_data = CacheConfig(cache_config=self.cache).serialize()
-        else:
-            self._cache_data = None
+#     def assemble(self):
+#         if self.cache is not None:
+#             if isinstance(self.cache, CacheConfig):
+#                 self._cache_data = self.cache.serialize()
+#             else:
+#                 self._cache_data = CacheConfig(cache_config=self.cache).serialize()
+#         else:
+#             self._cache_data = None
 
-        if self.cors is not None:
-            self._cors_data = self.cors.serialize()
-        else:
-            self._cors_data = None
+#         if self.cors is not None:
+#             self._cors_data = self.cors.serialize()
+#         else:
+#             self._cors_data = None
 
-    async def serialize(self) -> bytes:
-        payload, inType = await pack_payload(self.payload)
-        self.inType = inType
+#     async def serialize(self) -> bytes:
+#         payload, inType = await pack_payload(self.payload)
+#         self.inType = inType
         
-        s = pack_temp_data_object(
-            version=0,
-            dataType=self.dataType,
-            inType=self.inType,
-            path=self.path,
-            payload=payload,
-            cache=self._cache_data,
-            cors=self._cors_data,
-            abs_id=self.id
-        )
+#         s = pack_temp_data_object(
+#             version=0,
+#             dataType=self.dataType,
+#             inType=self.inType,
+#             path=self.path,
+#             payload=payload,
+#             cache=self._cache_data,
+#             cors=self._cors_data,
+#             abs_id=self.id
+#         )
 
-        return s
+#         return s
     
-    @staticmethod
-    def deserialize(data: bytes) -> 'TempDataObject':
-        d = unpack_temp_data_object(data)
-        payload = unpack_payload(d.get('payload'), d.get('inType'))
+#     @staticmethod
+#     def deserialize(data: bytes) -> 'TempDataObject':
+#         d = unpack_temp_data_object(data)
+#         payload = unpack_payload(d.get('payload'), d.get('inType'))
         
-        return TempDataObject(
-            dataType=d['dataType'],
-            inType=d['inType'],
-            path=d['path'],
-            payload=payload,
-            cache=d['cache'],
-            cors=d['cors'],
-            abs_id=d['abs_id'] if 'abs_id' in d else None
-        )
+#         return TempDataObject(
+#             dataType=d['dataType'],
+#             inType=d['inType'],
+#             path=d['path'],
+#             payload=payload,
+#             cache=d['cache'],
+#             cors=d['cors'],
+#             abs_id=d['abs_id'] if 'abs_id' in d else None
+#         )
 
 
-class TempDataGroup:
-    def __init__(self,
-                 method:  Optional[Union[Literal['get', 'post', 'put', 'delete'], str]],
-                 path: str,
-                 payload: List[TempDataObject],
-                 cache: Optional[Union[CacheConfig, Dict[str, Any]]] = None,
-                 cors: Optional[CORSObject] = None,
-                 auto_include: bool = True
-                 ) -> None:
-        """
-        # Временная группа данных
+# class TempDataGroup:
+#     def __init__(self,
+#                  method:  Optional[Union[Literal['get', 'post', 'put', 'delete'], str]],
+#                  path: str,
+#                  payload: List[TempDataObject],
+#                  cache: Optional[Union[CacheConfig, Dict[str, Any]]] = None,
+#                  cors: Optional[CORSObject] = None,
+#                  auto_include: bool = True
+#                  ) -> None:
+#         """
+#         # Временная группа данных
 
-        :param path: Путь к группе данных
-        :param payload: Список временных объектов данных
-        :param auto_include: При запросе любого объекта из группы, возвращать всю группу
-        """
-        self.path = path
-        self.payload = payload
-        self.auto_include = auto_include
+#         :param path: Путь к группе данных
+#         :param payload: Список временных объектов данных
+#         :param auto_include: При запросе любого объекта из группы, возвращать всю группу
+#         """
+#         self.path = path
+#         self.payload = payload
+#         self.auto_include = auto_include
 
-        self.method = method or 'get',
-        self.cache = cache
-        self.cors = cors
+#         self.method = method or 'get',
+#         self.cache = cache
+#         self.cors = cors
     
 
-    async def assemble(self):
-        a = []
-        for i in self.payload:
-            if i.cache is None:
-                i.cache = self.cache
+#     async def assemble(self):
+#         a = []
+#         for i in self.payload:
+#             if i.cache is None:
+#                 i.cache = self.cache
                 
-            if i.cors is None:
-                i.cors = self.cors
+#             if i.cors is None:
+#                 i.cors = self.cors
                 
-            s = await i.serialize()
-            a.append(s)
-        self.payload = a
+#             s = await i.serialize()
+#             a.append(s)
+#         self.payload = a
 
-    def serialize(self) -> bytes:
-        if isinstance(self.payload[0], TempDataObject):
-            raise ValueError('TempDataGroup is not assembled')
+#     def serialize(self) -> bytes:
+#         if isinstance(self.payload[0], TempDataObject):
+#             raise ValueError('TempDataGroup is not assembled')
         
-        return pack_temp_data_group(
-            version=0,
-            path=self.path,
-            payload=self.payload # type: ignore
-        )
+#         return pack_temp_data_group(
+#             version=0,
+#             path=self.path,
+#             payload=self.payload # type: ignore
+#         )
 
-    @staticmethod
-    def deserialize(data: bytes) -> 'TempDataGroup':
-        d = unpack_temp_data_group(data)
-        return TempDataGroup(
-            method='get',
-            path=d['path'],
-            payload=d['payload']
-        )
+#     @staticmethod
+#     def deserialize(data: bytes) -> 'TempDataGroup':
+#         d = unpack_temp_data_group(data)
+#         return TempDataGroup(
+#             method='get',
+#             path=d['path'],
+#             payload=d['payload']
+#         )
 
 
 class GNRequest:
@@ -990,7 +982,7 @@ class GNRequest:
                 
             :return: Literal['net', 'client', 'server']
             """
-            return self.model_client_types[self._data.get('client-type', 1)]
+            return self.model_client_types[self._data.get('client-type', 1)] # type: ignore
         
         @property
         def type_int(self) -> Literal[1, 4, 2]:
@@ -1064,13 +1056,13 @@ class GNRequest:
             route =  d['route']
             url =  d['url']
             cookies =  d['cookies']
-            cookies = deserialize(cookies) if cookies is not None else None
+            cookies = cast(dict, deserialize(cookies) if cookies is not None else None)
 
             inType = None
             if cookies is not None:
                 inType = cookies.get('gn', {}).get('inType', None)
             
-            payload = unpack_payload(d.get('payload'), inType)
+            payload = cast(SerializableType, unpack_payload(d.get('payload'), inType))
 
 
             r = GNRequest(
@@ -1235,7 +1227,7 @@ class GNResponse(Exception):
     """
     def __init__(self,
                  command: Union[str, int, bool, bytes],
-                 payload: Optional[Union[SerializableType, TempDataGroup, TempDataObject]] = None,
+                 payload: Optional[Union[SerializableType, 'TempDataObject']] = None,
                  cookies: Optional[dict] = None
                  ):
         
@@ -1283,7 +1275,7 @@ class GNResponse(Exception):
         if cookies is not None:
             inType = cookies.get('gn', {}).get('inType', None)
         
-        payload = unpack_payload(u.get('payload'), inType)
+        payload = cast(Optional[Union[SerializableType, 'TempDataObject']], unpack_payload(u.get('payload'), inType))
         
         return GNResponse(
             command=u['command'],
@@ -1292,7 +1284,7 @@ class GNResponse(Exception):
         )
     
     @property
-    def payload(self) -> Optional[Union[SerializableType, TempDataGroup, TempDataObject]]:
+    def payload(self) -> Optional[Union[SerializableType, 'TempDataObject']]:
         return self._payload
     
     @property
@@ -1434,5 +1426,40 @@ class CommandObject(AllGNFastCommands):
 
 
 
+class TempDataObject: # Aracada container
+    __slots__ = ['container']
+    def __init__(self, container: Optional[bytes] = None) -> None:
+        """
+        # Временный объект данных
+        """
+        self.container = container
+
+    def setPayloadITP(self, interpreterType: Union[int, str], interpretatorVersion: int, payload: bytes, compression_info: Optional[Tuple[int, int, int, int]] = None):
+        """
+            Устанавливает полезную нагрузку в формате ITP (Interpreted Temporary Payload) для данного объекта.
+        :param interpreterType: Тип интерпретатора. Например, `js`, `html`, `py` и т.д. (как mime-type в http).
+        :param interpretatorVersion: Версия интерпретатора. Например, `1`, `2` и т.д.
+        :param payload: Полезная нагрузка в виде байтов, которая будет упакована в формате ITP (Interpreted Temporary Payload) для использования с данным типом интерпретатора и версией.
+        
+        """
+        self.container = _Aracada_container_packer.encode_itp(payload, interpreterType, interpretatorVersion, compression_info)
+    
+    def getPayloadITP(self) -> Optional[Tuple[Union[int, str], int, bytes]]:
+        """
+        Получает полезную нагрузку в формате ITP (Interpreted Temporary Payload) из данного объекта.
+
+        :return: Кортеж, содержащий тип интерпретатора (например, `js`, `html`, `py` и т.д.), версию интерпретатора (например, `1`, `2` и т.д.) и полезную нагрузку в виде байтов, которая была упакована в формате ITP для использования с данным типом интерпретатора и версией. Если контейнер не установлен или не содержит данных в формате ITP, возвращает None.
+        """
+        if self.container is None:
+            return None
+        return _Aracada_container_packer.decode_itp(self.container)
+    
 
 
+# class TempDataGroup:
+#     __slots__ = ['objects']
+#     def __init__(self, objects: Optional[List[TempDataObject]] = None) -> None:
+#         """
+#         # Временная группа данных
+#         """
+#         self.objects = objects or []

@@ -1356,7 +1356,7 @@ container type:
 
 _Mode = Union[Literal['itp'], str]
 
-class Container:
+class _Aracada_container_packer:
     _cctx_dict = {
         0: zstd.ZstdCompressor(level=1),
         1: zstd.ZstdCompressor(level=6),
@@ -1364,13 +1364,6 @@ class Container:
         3: zstd.ZstdCompressor(level=19)
     }
     _dc = zstd.ZstdDecompressor()
-
-    @staticmethod
-    def decode(data: bytes) -> bytes:
-        _type = int.from_bytes(data[0:2], "big")
-        if _type != 1:
-            raise NotImplementedError(f"Unsupported container type: {_type}")
-
 
 
     @staticmethod
@@ -1384,7 +1377,7 @@ class Container:
         if alg != 0:
             raise NotImplementedError(f"Unknown compression algorithm code: {alg}")
         
-        c = Container._cctx_dict.get(l)
+        c = _Aracada_container_packer._cctx_dict.get(l)
 
         if c is None:
             raise ValueError(f"Unknown compression level code: {l}. Supported levels: 0-3")
@@ -1404,12 +1397,12 @@ class Container:
         
         
         try:
-            return Container._dc.decompress(data)
+            return _Aracada_container_packer._dc.decompress(data)
         except zstd.ZstdError as e:
             raise ValueError(f"Decompression failed: {e}")
 
     @staticmethod
-    def encode_itp(data: bytes, interpretatorType: Union[int, str], interpretatorVersion: int = 1) -> bytes:
+    def encode_itp(data: bytes, interpretatorType: Union[int, str], interpretatorVersion: int = 1, compression_info: Optional[Tuple[int, int, int, int]] = None) -> bytes:
         head = bytearray()
         head.extend((1).to_bytes(2, "big"))  # container type: itp
 
@@ -1434,10 +1427,10 @@ class Container:
         
         # compression
         if interpretatorType in common_inTypes_compression_support:
-            compression_support = common_inTypes_compression_support.get(interpretatorType, (0, 0, 0, 0))
-            head.extend(bytes(compression_support))
+            compression_support = common_inTypes_compression_support.get(interpretatorType, (0, 0, 0, 0)) if compression_info is None else compression_info
+            head.extend(bytes(pack_byte_1_1_4_2(*compression_support)))  # compression support info
 
-            payload = Container._compress_object(data, *compression_support)
+            payload = _Aracada_container_packer._compress_object(data, *compression_support)
         else:
             head.extend(bytes([0]))  # no compression support info
             payload = data
@@ -1445,7 +1438,7 @@ class Container:
         return bytes(head) + payload
     
     @staticmethod
-    def decode_itp(data: bytes) -> Optional[dict]:
+    def decode_itp(data: bytes) -> Optional[Tuple[Union[int, str], int, bytes]]:
         if len(data) < 4:
             raise ValueError("Data too short for container header")
         container_type = int.from_bytes(data[0:2], "big")
@@ -1479,13 +1472,9 @@ class Container:
         compression_support_byte = other_data[0]
         payload_comp = other_data[1:]
 
-        payload = Container._decompress_object(payload_comp, *unpack_byte_1_1_4_2(compression_support_byte))
+        payload = _Aracada_container_packer._decompress_object(payload_comp, *unpack_byte_1_1_4_2(compression_support_byte))
 
-        return {
-            'interpretatorType': interpretatorType,
-            'interpretatorVersion': version,
-            'payload': payload
-        }
+        return (interpretatorType, version, payload)
 
 
 

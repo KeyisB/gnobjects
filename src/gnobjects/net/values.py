@@ -92,7 +92,6 @@ tablex_dataTypes_to_transportObject = {
     'stream': 'stream'
 }
 
-
 common_inTypes = { # max 256
     'html': 0,
     'css': 1,
@@ -102,24 +101,25 @@ common_inTypes = { # max 256
     'py': 5
 }
 
+"""
+common_inTypes_compression_support:
+(
+    1. on
+    2. use pretrained map
+    3. alg
+    4. level of compression
+)
+"""
+common_inTypes_compression_support = {
+    0: (1, 0, 0, 2),
+    1: (1, 0, 0, 2),
+    2: (1, 0, 0, 2),
+    3: (1, 0, 0, 2), # svg can be compressed well with zstd
+    4: (0, 0, 0, 0),
+    5: (1, 0, 0, 2)
+}
+
 
 # legacy
 from ..gwis.values import tablex_gwis_object_types_int_to_str as _tablex_gwis_object_types_int_to_str
 tablex_gwiso_type_int_to_str = _tablex_gwis_object_types_int_to_str
-
-
-
-
-"""
-# TODO
-<1 interpretable type>:<2 level interpretable type>:...
-
-<interpretable type>/<specification> - like 'png/mini' or 'html/'
-
-"""
-
-common_inTypes_compression_support = {
-    0: (1, 0, 0, 1),
-    1: (1, 0, 0, 1),
-    2: (1, 0, 0, 1),
-}
