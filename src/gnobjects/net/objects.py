@@ -1012,6 +1012,47 @@ class GNResponse(Exception):
     
     def __str__(self) -> str:
         return f"[GNResponse]: {self._command} {self._payload}"
+    
+
+
+
+class TempDataObject: # Aracada container
+    __slots__ = ['container']
+    def __init__(self, container: Optional[bytes] = None) -> None:
+        """
+        # Временный объект данных
+        """
+        self.container = container
+
+    def setPayloadITP(self, interpreterType: Union[int, str], interpretatorVersion: int, payload: bytes, compression_info: Optional[Tuple[int, int, int, int]] = None):
+        """
+            Устанавливает полезную нагрузку в формате ITP (Interpreted Temporary Payload) для данного объекта.
+        :param interpreterType: Тип интерпретатора. Например, `js`, `html`, `py` и т.д. (как mime-type в http).
+        :param interpretatorVersion: Версия интерпретатора. Например, `1`, `2` и т.д.
+        :param payload: Полезная нагрузка в виде байтов, которая будет упакована в формате ITP (Interpreted Temporary Payload) для использования с данным типом интерпретатора и версией.
+        
+        """
+        self.container = _Aracada_container_packer.encode_itp(payload, interpreterType, interpretatorVersion, compression_info)
+    
+    def getPayloadITP(self) -> Optional[Tuple[Union[int, str], int, bytes]]:
+        """
+        Получает полезную нагрузку в формате ITP (Interpreted Temporary Payload) из данного объекта.
+
+        :return: Кортеж, содержащий тип интерпретатора (например, `js`, `html`, `py` и т.д.), версию интерпретатора (например, `1`, `2` и т.д.) и полезную нагрузку в виде байтов, которая была упакована в формате ITP для использования с данным типом интерпретатора и версией. Если контейнер не установлен или не содержит данных в формате ITP, возвращает None.
+        """
+        if self.container is None:
+            return None
+        return _Aracada_container_packer.decode_itp(self.container)
+    
+
+
+class TempDataGroup:
+    __slots__ = ['objects']
+    def __init__(self, objects: Optional[List[TempDataObject]] = None) -> None:
+        """
+        # Временная группа данных
+        """
+        self.objects = objects or []
 
 from .fastcommands import AllGNFastCommands, COMMAND_TREE, COMMAND_PREFIX
 
@@ -1140,42 +1181,3 @@ class CommandObject(AllGNFastCommands):
 
 
 
-
-
-class TempDataObject: # Aracada container
-    __slots__ = ['container']
-    def __init__(self, container: Optional[bytes] = None) -> None:
-        """
-        # Временный объект данных
-        """
-        self.container = container
-
-    def setPayloadITP(self, interpreterType: Union[int, str], interpretatorVersion: int, payload: bytes, compression_info: Optional[Tuple[int, int, int, int]] = None):
-        """
-            Устанавливает полезную нагрузку в формате ITP (Interpreted Temporary Payload) для данного объекта.
-        :param interpreterType: Тип интерпретатора. Например, `js`, `html`, `py` и т.д. (как mime-type в http).
-        :param interpretatorVersion: Версия интерпретатора. Например, `1`, `2` и т.д.
-        :param payload: Полезная нагрузка в виде байтов, которая будет упакована в формате ITP (Interpreted Temporary Payload) для использования с данным типом интерпретатора и версией.
-        
-        """
-        self.container = _Aracada_container_packer.encode_itp(payload, interpreterType, interpretatorVersion, compression_info)
-    
-    def getPayloadITP(self) -> Optional[Tuple[Union[int, str], int, bytes]]:
-        """
-        Получает полезную нагрузку в формате ITP (Interpreted Temporary Payload) из данного объекта.
-
-        :return: Кортеж, содержащий тип интерпретатора (например, `js`, `html`, `py` и т.д.), версию интерпретатора (например, `1`, `2` и т.д.) и полезную нагрузку в виде байтов, которая была упакована в формате ITP для использования с данным типом интерпретатора и версией. Если контейнер не установлен или не содержит данных в формате ITP, возвращает None.
-        """
-        if self.container is None:
-            return None
-        return _Aracada_container_packer.decode_itp(self.container)
-    
-
-
-# class TempDataGroup:
-#     __slots__ = ['objects']
-#     def __init__(self, objects: Optional[List[TempDataObject]] = None) -> None:
-#         """
-#         # Временная группа данных
-#         """
-#         self.objects = objects or []
