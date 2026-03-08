@@ -325,6 +325,30 @@ class AllGNFastCommands:
             # Неизвесная ошибка подключения
             """
             cls_command = "gn:transport:16"
+
+        @register_command(("transport", 'PolicyDenied'))
+        class PolicyDenied(GNFastCommand):
+            """
+            # Соединение отклонено политикой
+            Ошибка указывает, что соединение отклонено настройками безопасности или политикой сервера.
+            """
+            cls_command = "gn:transport:17"
+
+        @register_command(("transport", 'KeyIdNotFound'))
+        class KeyIdNotFound(GNFastCommand):
+            """
+            # Не найден keyId для домена
+            Ошибка указывает, что отсутствует keyId для указанного домена.
+            """
+            cls_command = "gn:transport:18"
+
+        @register_command(("transport", 'KeyDomainNotFound'))
+        class KeyDomainNotFound(GNFastCommand):
+            """
+            # Не найден домен для keyId
+            Ошибка указывает, что отсутствует домен, соответствующий указанному keyId.
+            """
+            cls_command = "gn:transport:19"
     
     class app:
         """
