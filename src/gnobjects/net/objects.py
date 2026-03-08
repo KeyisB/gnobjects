@@ -797,7 +797,7 @@ class GNRequest:
         d: str = self.client._data['domain']
 
         ct = None
-        if d.endswith('~shield.gn'):
+        if d.endswith('.shield.gn'):
             ct = 1
         elif d.endswith('~gwis'):
             ct = 4
