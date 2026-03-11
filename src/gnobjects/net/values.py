@@ -5,13 +5,11 @@ gn_core_domains = (
     'abs',
     'sys',
     'net'
-    )
+)
 
 gn_sys_domains = (
-    'gn',
-    'vm',
-    'net'
-    )
+    'gn'
+)
 
 gn_domains = (
     'com',
