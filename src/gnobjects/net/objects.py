@@ -20,6 +20,7 @@ from ._data_pack import (
 
 
 from .domains import GNDomain
+from ..gwis.values import tablex_gwis_object_types_int_to_str
 
 
 
@@ -478,7 +479,7 @@ class GNRequest:
     class __object:
         def __init__(self, request: 'GNRequest') -> None:
             self.__request = request
-            self._data = self.__request._cookies.setdefault('gwis', {}).setdefault('o', {})
+            self._data: dict = self.__request._cookies.setdefault('gn', {}).setdefault('gwis', {})
             
         
         @property
@@ -568,7 +569,7 @@ class GNRequest:
 
             :return: Union[Literal['user', 'service', 'gbn', 'company', 'project', 'app', 'doo'], str]
             """
-            return self._data.get("object_type", 0)
+            return tablex_gwis_object_types_int_to_str.get(self._data.get("object_type", 0), 'gbn')
         
         @property
         def viewingType(self) -> int:

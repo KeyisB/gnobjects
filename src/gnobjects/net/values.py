@@ -40,7 +40,6 @@ common_gnrequest_routes = { # max 255
 }
 
 common_gnrequest_dataTypes = { # max 16
-    'lib': 0,
     'static': 1,
     'api': 2,
     'img': 3,
@@ -81,14 +80,6 @@ tablex_file_extension_to_inType = {
     'py': 'py'
 }
 
-tablex_dataTypes_to_transportObject = {
-    'lib': 'tdo',
-    'static': 'tdo',
-    'api': 'api',
-    'img': 'tdo',
-    'fat': 'tdo',
-    'stream': 'stream'
-}
 
 common_inTypes = { # max 256
     'html': 0,
