@@ -8,7 +8,7 @@ gn_core_domains = (
 )
 
 gn_sys_domains = (
-    'gn'
+    'gn',
 )
 
 gn_domains = (
