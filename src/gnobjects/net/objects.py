@@ -3,18 +3,17 @@ import os
 import ast
 from typing import Optional, Dict, Any, List, Union, Literal, Tuple, cast, overload
 import anyio
+from pathlib import Path
+
 from KeyisBTools.models.serialization import serialize, deserialize, SerializableType
 
 from .gnTransportProtocolParser import GNTransportProtocol, parse_gn_protocol
-
-
 from .values import tablex_file_extension_to_inType
 from ._data_pack import (
     pack_gnrequest,
     unpack_gnrequest,
     pack_gnresponse,
     unpack_gnresponse,
-
     _Aracada_container_packer
     )
 
@@ -304,13 +303,13 @@ class FileObject:
     @overload
     def __init__(
         self,
-        path: str
+        path: str | Path
     ) -> None: ...
 
     @overload
     def __init__(
         self,
-        path: str,
+        path: str | Path,
         inType: Union[Literal['html', 'css', 'js', 'svg', 'png', 'py'], str]
     ) -> None: ...
 
@@ -323,19 +322,19 @@ class FileObject:
 
     def __init__(  # type: ignore
         self,
-        path_or_data: Union[str, bytes],
+        path_or_data: Union[str | Path, bytes],
         inType: Optional[str] = None
     ) -> None:
-        self._path: Optional[str] = None
+        self._path: Optional[str | Path] = None
         self._data: Optional[bytes] = None
         self._inType: Optional[str] = None
         self._is_assembly: Optional[Tuple[bytes, str]] = None
 
-        if isinstance(path_or_data, str):
+        if isinstance(path_or_data, (str, Path)):
             self._path = path_or_data
 
             if inType is None:
-                ext = os.path.splitext(path_or_data)[1]
+                ext = os.path.splitext(str(path_or_data))[1]
                 if ext.startswith('.'):
                     ext = ext[1:]
                 guessed = tablex_file_extension_to_inType.get(ext)
@@ -358,14 +357,14 @@ class FileObject:
             return self._is_assembly
 
         if self._data is None:
-            if not isinstance(self._path, str):
-                raise Exception('Ошибка сборки файла -> Путь к файлу не str')
+            if not isinstance(self._path, (str, Path)):
+                raise Exception('Ошибка сборки файла -> Путь к файлу не str или Path')
             
             if not os.path.exists(self._path):
                 raise Exception(f'Ошибка сборки файла -> Файл не найден {self._path}')
 
             try:
-                async with await anyio.open_file(self._path, mode="rb") as file:
+                async with await anyio.open_file(str(self._path), mode="rb") as file:
                     self._data = await file.read()
             except Exception as e:
                 raise Exception(f'Ошибка сборки файла -> Ошиибка при чтении файла: {e}')
