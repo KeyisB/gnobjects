@@ -417,7 +417,7 @@ def unpack_payload(p: Optional[bytes]) -> Optional[Union[SerializableType, 'Temp
     elif pt == 1:
         rp = deserialize(p)
     elif pt == 2:
-        rp = TempDataObject.deserialize(p)
+        rp = TempDataObject(p)
     elif pt == 5:
         rp = GNRequest.deserialize(p)
     elif pt == 6:
