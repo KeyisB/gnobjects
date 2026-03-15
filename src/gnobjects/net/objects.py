@@ -1027,7 +1027,7 @@ class TempDataObject: # Aracada container
 
     def setPayloadITP(self, interpreterType: Union[int, str], interpretatorVersion: int, payload: bytes, compression_info: Optional[Tuple[int, int, int, int]] = None):
         """
-            Устанавливает полезную нагрузку в формате ITP (Interpreted Temporary Payload) для данного объекта.
+            Устанавливает полезную нагрузку в формате ITP (Interpretable Temporary Payload) для данного объекта.
         :param interpreterType: Тип интерпретатора. Например, `js`, `html`, `py` и т.д. (как mime-type в http).
         :param interpretatorVersion: Версия интерпретатора. Например, `1`, `2` и т.д.
         :param payload: Полезная нагрузка в виде байтов, которая будет упакована в формате ITP (Interpreted Temporary Payload) для использования с данным типом интерпретатора и версией.
