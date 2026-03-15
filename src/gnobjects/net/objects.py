@@ -377,38 +377,35 @@ class FileObject:
     def deserialize(data: bytes, inType: str):
         return FileObject(data, inType)
 
-async def pack_payload(payload: Union[SerializableType, FileObject, 'TempDataObject', 'GNRequest', 'GNResponse']) -> Tuple[Optional[bytes], Optional[str]]:
+def pack_payload(payload: Union[SerializableType, 'TempDataObject', 'GNRequest', 'GNResponse']) -> Optional[bytes]:
     if payload is None:
-        return (None, None)
+        return None
     
-    inType = None
     
     if isinstance(payload, bytes):
         spayload = payload
         payload_type = 0
     elif isinstance(payload, TempDataObject):
-        payload.assemble()
-        spayload = await payload.serialize()
+        spayload = payload.container
+        if spayload is None:
+            raise Exception('TempDataObject container is None')
         payload_type = 2
-    elif isinstance(payload, FileObject):
-        spayload, inType = await payload.assembly()
-        payload_type = 4
     elif isinstance(payload, GNRequest):
-        spayload = await payload.serialize()
+        spayload = payload.serialize()
         payload_type = 5
     elif isinstance(payload, GNResponse):
-        await payload.assembly()
+        payload.assembly()
         spayload = payload.serialize()
         payload_type = 6
     else:
         spayload = serialize(payload)
         payload_type = 1
 
-    return (bytes([payload_type]) + spayload, inType)
+    return bytes([payload_type]) + spayload
     
     
 
-def unpack_payload(p: Optional[bytes], inType: Optional[str] = None) -> Optional[Union[SerializableType, FileObject, 'TempDataObject', 'GNRequest', 'GNResponse']]:
+def unpack_payload(p: Optional[bytes]) -> Optional[Union[SerializableType, 'TempDataObject', 'GNRequest', 'GNResponse']]:
     if p is None:
         return None
     
@@ -421,8 +418,6 @@ def unpack_payload(p: Optional[bytes], inType: Optional[str] = None) -> Optional
         rp = deserialize(p)
     elif pt == 2:
         rp = TempDataObject.deserialize(p)
-    elif pt == 4:
-        rp = FileObject.deserialize(p, cast(str, inType))
     elif pt == 5:
         rp = GNRequest.deserialize(p)
     elif pt == 6:
@@ -732,16 +727,14 @@ class GNRequest:
             """
             return self._data.get("domain", None)
 
-    async def serialize(self, version: int = 0) -> bytes:
+    def serialize(self, version: int = 0) -> bytes:
         if self._transport is None: self.setTransport()
         if self._route is None: self.setRoute()
 
         cookies = {}
 
         if self._payload is not None:
-            payload, inType = await pack_payload(self.payload)
-            if inType is not None:
-                cookies.setdefault('gn', {})['inType'] = inType
+            payload = pack_payload(self.payload)
         else:
             payload = None
         
@@ -777,12 +770,8 @@ class GNRequest:
             url =  d['url']
             cookies =  d['cookies']
             cookies = cast(dict, deserialize(cookies) if cookies is not None else None)
-
-            inType = None
-            if cookies is not None:
-                inType = cookies.get('gn', {}).get('inType', None)
             
-            payload = cast(SerializableType, unpack_payload(d.get('payload'), inType))
+            payload = cast(SerializableType, unpack_payload(d.get('payload')))
 
 
             r = GNRequest(
@@ -962,12 +951,10 @@ class GNResponse(Exception):
         # Команда запроса `CommandObject`
         """
 
-    async def assembly(self):
+    def assembly(self):
 
         
-        self._payload, inType = await pack_payload(self.payload)
-        if inType is not None:
-            self._cookies.setdefault('gn', {})['inType'] = inType
+        self._payload = pack_payload(self.payload)
         
 
     def serialize(self) -> bytes:
@@ -990,16 +977,12 @@ class GNResponse(Exception):
         
         cookies =  u['cookies']
         cookies = cast(dict, deserialize(cookies)) if cookies is not None else None
-
-        inType = None
-        if cookies is not None:
-            inType = cookies.get('gn', {}).get('inType', None)
         
-        payload = cast(Optional[Union[SerializableType, 'TempDataObject']], unpack_payload(u.get('payload'), inType))
+        payload = unpack_payload(u.get('payload'))
         
         return GNResponse(
             command=u['command'],
-            payload=payload,
+            payload=payload, # type: ignore
             cookies=cookies
         )
     
