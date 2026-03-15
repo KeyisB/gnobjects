@@ -2,13 +2,12 @@ gn_core_domains = (
     'core',
     'gw',
     'gwis',
-    'abs',
-    'sys',
-    'net'
+    'abs'
 )
 
 gn_sys_domains = (
     'gn',
+    'sys'
 )
 
 gn_domains = (
@@ -47,11 +46,6 @@ common_gnrequest_dataTypes = { # max 16
     'stream': 5
 }
 
-common_gnrequest_compressTypes = { # max 16
-    'none': 0,
-    'zstd': 1
-}
-
 base_gnrequest_inType = None
 
 
@@ -77,9 +71,8 @@ tablex_file_extension_to_inType = {
     'js': 'js',
     'svg': 'svg',
     'png': 'png',
-    'py': 'py'
+    'py': 'py',
 }
-
 
 common_inTypes = { # max 256
     'html': 0,
@@ -93,10 +86,10 @@ common_inTypes = { # max 256
 """
 common_inTypes_compression_support:
 (
-    1. on
+    1. on/off
     2. use pretrained map
-    3. alg
-    4. level of compression
+    3. alg (0 = zstd,...)
+    4. level of compression (1 - 3)
 )
 """
 common_inTypes_compression_support = {
@@ -112,3 +105,8 @@ common_inTypes_compression_support = {
 # legacy
 from ..gwis.values import tablex_gwis_object_types_int_to_str as _tablex_gwis_object_types_int_to_str
 tablex_gwiso_type_int_to_str = _tablex_gwis_object_types_int_to_str
+
+common_gnrequest_compressTypes = { # max 16
+    'none': 0,
+    'zstd': 1
+}
