@@ -300,8 +300,6 @@ class FileObject:
     :param path: `str` Путь к файлу для сборки. Если указано, будет использоваться для чтения данных при сборке.
     :param data: `bytes` Данные для сборки. Если указано, будет использоваться напрямую при сборке.
     :param inType: `str` Тип содержимого файла в соответствии с стандартом ITP interpreters (например, 'html', 'css', 'js', 'svg', 'png', 'py').
-
-            
     """
     @overload
     def __init__(
@@ -337,7 +335,7 @@ class FileObject:
             self._path = path_or_data
 
             if inType is None:
-                ext = os.path.splitext(path_or_data)[1].lower()
+                ext = os.path.splitext(path_or_data)[1]
                 if ext.startswith('.'):
                     ext = ext[1:]
                 guessed = tablex_file_extension_to_inType.get(ext)
@@ -372,15 +370,13 @@ class FileObject:
             except Exception as e:
                 raise Exception(f'Ошибка сборки файла -> Ошиибка при чтении файла: {e}')
 
-        self._is_assembly = (self._data, self._inType) # type: ignore
+        self._is_assembly = (self._data, self._inType)
 
         return self._is_assembly # type: ignore
     
     @staticmethod
     def deserialize(data: bytes, inType: str):
         return FileObject(data, inType)
-
-
 
 async def pack_payload(payload: Union[SerializableType, FileObject, 'TempDataObject', 'GNRequest', 'GNResponse']) -> Tuple[Optional[bytes], Optional[str]]:
     if payload is None:
@@ -1025,13 +1021,42 @@ class GNResponse(Exception):
 
 
 
-class TempDataObject: # Aracada container
+class TempDataObject:
     __slots__ = ['container']
-    def __init__(self, container: Optional[bytes] = None) -> None:
-        """
-        # Временный объект данных
-        """
-        self.container = container
+
+    @overload
+    def __init__(self,
+                interpreterType: Union[int, str],
+                interpretatorVersion: int,
+                payload: bytes
+    ) -> None: ...
+
+    @overload
+    def __init__(self,
+                interpreterType: Union[int, str],
+                interpretatorVersion: int,
+                payload: bytes,
+                compression_info: Optional[Tuple[int, int, int, int]] = None
+    ) -> None: ...
+
+    @overload
+    def __init__(self,
+                container: Optional[bytes] = None
+    ) -> None: ...
+    
+    def __init__(self, *args, **kwargs) -> None:
+        self.container = None
+
+        if 'container' in kwargs or len(args) == 1:
+            self.container = kwargs.get('container', args[0] if args else None)
+            return
+
+        interpreterType = kwargs.get('interpreterType', args[0] if len(args) > 0 else None)
+        interpretatorVersion = kwargs.get('interpretatorVersion', args[1] if len(args) > 1 else None)
+        payload = kwargs.get('payload', args[2] if len(args) > 2 else None)
+        compression_info = kwargs.get('compression_info', args[3] if len(args) > 3 else None)
+
+        self.setPayloadITP(interpreterType, interpretatorVersion, payload, compression_info) # type: ignore
 
     def setPayloadITP(self, interpreterType: Union[int, str], interpretatorVersion: int, payload: bytes, compression_info: Optional[Tuple[int, int, int, int]] = None):
         """

@@ -1402,7 +1402,7 @@ class _Aracada_container_packer:
             raise ValueError(f"Decompression failed: {e}")
 
     @staticmethod
-    def encode_itp(data: bytes, interpretatorType: Union[int, str], interpretatorVersion: int = 1, compression_info: Optional[Tuple[int, int, int, int]] = None) -> bytes:
+    def encode_itp(data: bytes, interpretatorType: Union[int, str], interpretatorVersion: int = 0, compression_info: Optional[Tuple[int, int, int, int]] = None) -> bytes:
         head = bytearray()
         head.extend((1).to_bytes(2, "big"))  # container type: itp
 

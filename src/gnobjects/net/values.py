@@ -368,15 +368,7 @@ common_inTypes = { # max 256
     'pem': 69,
 }
 
-"""
-common_inTypes_compression_support:
-(
-    1. on/off
-    2. use pretrained map
-    3. alg (0 = zstd,...)
-    4. level of compression (1 - 3)
-)
-"""
+
 common_inTypes_compression_support = {
     common_inTypes['html']: (1, 0, 0, 2),
     common_inTypes['css']: (1, 0, 0, 2),
@@ -449,7 +441,15 @@ common_inTypes_compression_support = {
     common_inTypes['npz']: (0, 0, 0, 0),
     common_inTypes['pem']: (1, 0, 0, 2),
 }
-
+"""
+common_inTypes_compression_support:
+(
+    1. on/off
+    2. use pretrained map
+    3. alg (0 = zstd,...)
+    4. level of compression (1 - 3)
+)
+"""
 
 # legacy
 from ..gwis.values import tablex_gwis_object_types_int_to_str as _tablex_gwis_object_types_int_to_str
