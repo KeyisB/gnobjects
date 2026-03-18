@@ -1056,10 +1056,13 @@ class TempDataObject:
 
         :return: Кортеж, содержащий тип интерпретатора (например, `js`, `html`, `py` и т.д.), версию интерпретатора (например, `1`, `2` и т.д.) и полезную нагрузку в виде байтов, которая была упакована в формате ITP для использования с данным типом интерпретатора и версией. Если контейнер не установлен или не содержит данных в формате ITP, возвращает None.
         """
+        print(f'Getting ITP payload from TempDataObject with container: {self.container}')
         if self.container is None:
             return None
-        return _Aracada_container_packer.decode_itp(self.container)
-    
+        print(f'Decoding ITP payload from TempDataObject with container size: {len(self.container)} bytes')
+        r = _Aracada_container_packer.decode_itp(self.container)
+        print(f'Decoded ITP payload: {r}')
+        return r
 
 
 class TempDataGroup:
