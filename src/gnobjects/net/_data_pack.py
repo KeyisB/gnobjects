@@ -1422,19 +1422,18 @@ class _Aracada_container_packer:
             head.extend(interpretatorType.to_bytes(2, "big"))  # interpretator type
 
         # interpretator version
-        a = encode_varlen_2358(interpretatorVersion)
+        a = encode_varlen_1248(interpretatorVersion)
         head.extend(a)
         
         # compression
         if interpretatorType in common_inTypes_compression_support:
             compression_support = common_inTypes_compression_support.get(interpretatorType, (0, 0, 0, 0)) if compression_info is None else compression_info
-            head.extend(bytes(pack_byte_1_1_4_2(*compression_support)))  # compression support info
+            head.extend(bytes([pack_byte_1_1_4_2(*compression_support)]))  # compression support info
 
             payload = _Aracada_container_packer._compress_object(data, *compression_support)
         else:
             head.extend(bytes([0]))  # no compression support info
             payload = data
-
         return bytes(head) + payload
     
     @staticmethod
@@ -1466,7 +1465,7 @@ class _Aracada_container_packer:
 
         # interpretator version
 
-        version, _end = decode_varlen_2358(other_data)
+        version, _end = decode_varlen_1248(other_data)
         other_data = other_data[_end:]
 
         compression_support_byte = other_data[0]
