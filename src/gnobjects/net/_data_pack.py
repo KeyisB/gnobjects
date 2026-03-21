@@ -4,6 +4,8 @@ from typing import *
 
 import zstandard as zstd
 
+from KeyisBTools.models.serialization import SerializableType, serialize, deserialize
+
 
 from .values import (common_gnrequest_transports,
                      common_gnrequest_methods,
@@ -1426,10 +1428,9 @@ class _Aracada_container_packer:
         head.extend(a)
         
         # compression
-        if interpretatorType in common_inTypes_compression_support:
-            compression_support = common_inTypes_compression_support.get(interpretatorType, (0, 0, 0, 0)) if compression_info is None else compression_info
+        compression_support = common_inTypes_compression_support.get(interpretatorType, (0, 0, 0, 0)) if compression_info is None else compression_info # type: ignore
+        if compression_support is not None:
             head.extend(bytes([pack_byte_1_1_4_2(*compression_support)]))  # compression support info
-
             payload = _Aracada_container_packer._compress_object(data, *compression_support)
         else:
             head.extend(bytes([0]))  # no compression support info
@@ -1437,7 +1438,7 @@ class _Aracada_container_packer:
         return bytes(head) + payload
     
     @staticmethod
-    def decode_itp(data: bytes) -> Optional[Tuple[Union[int, str], int, bytes]]:
+    def decode_itp(data: bytes) -> tuple[int | str, int, bytes, tuple[int, int, int, int]] | None:
         if len(data) < 4:
             raise ValueError("Data too short for container header")
         container_type = int.from_bytes(data[0:2], "big")
@@ -1454,7 +1455,7 @@ class _Aracada_container_packer:
             d_, _end = decode_data_with_len(data[4:], '1248')
 
             interpretatorType = d_.decode('utf-8')
-            other_data = data[_end:]
+            other_data = data[4 + _end:]
 
         else:
             if interpretator_type in _rev_inTypes:
@@ -1471,9 +1472,49 @@ class _Aracada_container_packer:
         compression_support_byte = other_data[0]
         payload_comp = other_data[1:]
 
-        payload = _Aracada_container_packer._decompress_object(payload_comp, *unpack_byte_1_1_4_2(compression_support_byte))
+        compression_info = unpack_byte_1_1_4_2(compression_support_byte)
 
-        return (interpretatorType, version, payload)
+        payload = _Aracada_container_packer._decompress_object(payload_comp, *compression_info)
+
+        return (interpretatorType, version, payload, compression_info)
 
 
+    @staticmethod
+    def encode_stp(data: bytes, interpretatorVersion: int = 0, compression_info: Optional[Tuple[int, int, int, int]] = None) -> bytes:
+        head = bytearray()
+        head.extend((2).to_bytes(2, "big"))  # container type: stp
 
+        # interpretator version
+        a = encode_varlen_1248(interpretatorVersion)
+        head.extend(a)
+
+        
+        # compression
+        if compression_info is not None:
+            head.extend(bytes([pack_byte_1_1_4_2(*compression_info)]))  # compression support info
+            payload = _Aracada_container_packer._compress_object(data, *compression_info)
+        else:
+            head.extend(bytes([0]))  # no compression support info
+            payload = data
+        return bytes(head) + payload
+    
+    @staticmethod
+    def decode_stp(data: bytes) -> tuple[int, bytes, tuple[int, int, int, int]]:
+        if len(data) < 2:
+            raise ValueError("Data too short for container header")
+        container_type = int.from_bytes(data[0:2], "big")
+        if container_type != 2:
+            raise ValueError(f"Unsupported container type: {container_type}")
+        
+        # interpretator version
+        version, _end = decode_varlen_1248(data[2:])
+        other_data = data[2+_end:]
+
+        compression_support_byte = other_data[0]
+        payload_comp = other_data[1:]
+
+        compression_info = unpack_byte_1_1_4_2(compression_support_byte)
+
+        payload = _Aracada_container_packer._decompress_object(payload_comp, *compression_info)
+
+        return (version, payload, compression_info)

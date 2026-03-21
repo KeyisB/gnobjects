@@ -376,56 +376,199 @@ class FileObject:
     @staticmethod
     def deserialize(data: bytes, inType: str):
         return FileObject(data, inType)
-
-def pack_payload(payload: Union[SerializableType, 'TempDataObject', 'GNRequest', 'GNResponse']) -> Optional[bytes]:
-    if payload is None:
-        return None
     
-    
-    if isinstance(payload, bytes):
-        spayload = payload
-        payload_type = 0
-    elif isinstance(payload, TempDataObject):
-        spayload = payload.container
-        if spayload is None:
-            raise Exception('TempDataObject container is None')
-        payload_type = 2
-    elif isinstance(payload, GNRequest):
-        spayload = payload.serialize()
-        payload_type = 5
-    elif isinstance(payload, GNResponse):
-        payload.assembly()
-        spayload = payload.serialize()
-        payload_type = 6
-    else:
-        spayload = serialize(payload)
-        payload_type = 1
+    async def toTempDataObject(self, interpreterType: int | str | None = None, interpretatorVersion: int = 0, compression_info: tuple[int, int, int, int] | None = None) -> 'TempDataObject':
+        d, m = await self.assembly()
 
-    return bytes([payload_type]) + spayload
+        if m.count(':') == 1 and '/' not in m: # one interpret with version
+            m, v = m.rsplit(':', 1)
+            v = int(v)
+        else:
+            v = 0
+
+        tdo = TempDataObject.ITP(m if interpreterType is None else interpreterType, d, v if interpretatorVersion == 0 else interpretatorVersion, compression_info)
+        return tdo
+
+
     
     
 
-def unpack_payload(p: Optional[bytes]) -> Optional[Union[SerializableType, 'TempDataObject', 'GNRequest', 'GNResponse']]:
-    if p is None:
-        return None
+
+
+class STPContainer:
+    __slots__ = ['version', 'payload', 'compression_info']
+    def __init__(self, payload: SerializableType, version: int = 0, compression_info: tuple[int, int, int, int] | None = None) -> None:
+        """
+        # Контейнер для STP (Serializable Temporary Payload)
+
+        :param payload: Полезная нагрузка в виде сериализуемого объекта, которая будет упакована в формате STP для использования с данным типом интерпретатора и версией.
+        :param version: Версия интерпретатора. Например, `1`, `2` и т.д.
+        :param compression_info: Информация о сжатии в виде кортежа (например, (algorithm, level, ...)). Если None, сжатие не используется.
+        """
+        self.version = version
+        self.payload = payload
+        self.compression_info = compression_info
+
+    def serialize(self) -> bytes:
+        return _Aracada_container_packer.encode_stp(serialize(self.payload), self.version, self.compression_info)
+
+    @staticmethod
+    def deserialize(data: bytes) -> 'STPContainer':
+        r = _Aracada_container_packer.decode_stp(data)
+        if r is None:
+            raise ValueError('Invalid STP container data')
+        version, payload_bytes, compression_info = r
+        payload = deserialize(payload_bytes)
+        return STPContainer(payload, version, compression_info)
     
-    pt = p[0]
-    p = p[1:]
+class ITPContainer:
+    __slots__ = ['interpreterType', 'interpretatorVersion', 'payload', 'compression_info']
+    def __init__(self, interpreterType: int | str, payload: bytes, interpretatorVersion: int,  compression_info: tuple[int, int, int, int] | None = None) -> None:
+        """
+        # Контейнер для ITP (Interpretable Temporary Payload)
 
-    if pt == 0:
-        rp = p
-    elif pt == 1:
-        rp = deserialize(p)
-    elif pt == 2:
-        rp = TempDataObject(p)
-    elif pt == 5:
-        rp = GNRequest.deserialize(p)
-    elif pt == 6:
-        rp = GNResponse.deserialize(p)
-    else:
-        return None
+        :param interpreterType: Тип интерпретатора. Например, `js`, `html`, `py` и т.д. (как mime-type в http).
+        :param interpretatorVersion: Версия интерпретатора. Например, `1`, `2` и т.д.
+        :param payload: Полезная нагрузка в виде байтов, которая будет упакована в формате ITP для использования с данным типом интерпретатора и версией.
+        :param compression_info: Информация о сжатии в виде кортежа (например, (algorithm, level, ...)). Если None, сжатие не используется.
+        """
+        self.interpreterType = interpreterType
+        self.interpretatorVersion = interpretatorVersion
+        self.payload = payload
+        self.compression_info = compression_info
+    
+    def serialize(self) -> bytes:
+        return _Aracada_container_packer.encode_itp(self.payload, self.interpreterType, self.interpretatorVersion, self.compression_info)
+    
+    @staticmethod
+    def deserialize(data: bytes) -> 'ITPContainer':
+        r = _Aracada_container_packer.decode_itp(data)
+        if r is None:
+            raise ValueError('Invalid ITP container data')
+        interpreterType, interpretatorVersion, payload, compression_info = r
+        return ITPContainer(interpreterType, payload, interpretatorVersion, compression_info)
 
-    return rp
+class TempDataObject:
+    __slots__ = ['_container']
+
+    @overload
+    def __init__(self,
+                interpreterType: int | str,
+                payload: bytes,
+                interpretatorVersion: int = 0
+    ) -> None: ...
+
+    @overload
+    def __init__(self,
+                interpreterType: int | str,
+                payload: bytes,
+                interpretatorVersion: int = 0,
+                compression_info: tuple[int, int, int, int] | None = None
+    ) -> None: ...
+
+    @overload
+    def __init__(self,
+                container: STPContainer | ITPContainer | bytes | None = None
+    ) -> None:
+        """
+        # Временный объект данных
+
+        :param container: Контейнер данных, который может быть контейнером или сериализованным контейнером (`bytes`).
+
+        Если контейнер сериализован, то при запросе .container он будет распакован в контейнер.
+        """
+        ...
+    
+    def __init__(self, *args, **kwargs) -> None:
+        self._container = None
+
+        if 'container' in kwargs or len(args) == 1:
+            self._container = kwargs.get('container', args[0] if args else None)
+            return
+
+        interpreterType = kwargs.get('interpreterType', args[0] if len(args) > 0 else None)
+        payload = kwargs.get('payload', args[1] if len(args) > 1 else None)
+        interpretatorVersion = kwargs.get('interpretatorVersion', args[2] if len(args) > 2 else None)
+        compression_info = kwargs.get('compression_info', args[3] if len(args) > 3 else None)
+
+        if interpreterType is not None and payload is not None:
+            if interpretatorVersion is None:
+                interpretatorVersion = 0
+            self._container = ITPContainer(interpreterType, payload, interpretatorVersion, compression_info)
+
+    def setContainer(self, container: STPContainer | ITPContainer):
+        self._container = container
+    
+    def serialize(self) -> bytes | None:
+        """
+        # Сериализация контейнера данных
+        Сериализует контейнер данных, если он установлен в сериализованный объект `TempDataObject`.
+        """
+        if self._container is None:
+            return None
+        
+        if isinstance(self._container, bytes):
+            return self._container
+        return self._container.serialize()
+    
+    @property
+    def container(self) -> STPContainer | ITPContainer | None:
+        """
+        # Контейнер данных
+
+        Возвращает контейнер данных, распаковывая его при необходимости. Если контейнер не установлен, возвращает None.
+        """
+        if self._container is None:
+            return None
+
+        if isinstance(self._container, bytes):
+            self._unpack_container()
+        
+        return self._container # type: ignore
+
+    @staticmethod
+    def deserialize(data: bytes, unpack_container: bool = False) -> 'TempDataObject':
+        tdo = TempDataObject(container=data)
+
+        if unpack_container:
+            tdo._unpack_container()
+
+        return tdo
+    
+    def _unpack_container(self) -> STPContainer | ITPContainer:
+        if self._container is None:
+            raise ValueError('TempDataObject container is None')
+        
+        if isinstance(self._container, bytes):
+            t = int.from_bytes(self._container[0:2], "big")
+            if t == 1:  # ITP
+                self._container = ITPContainer.deserialize(self._container)
+            elif t == 2:  # STP
+                self._container = STPContainer.deserialize(self._container)
+            else:
+                raise ValueError('Invalid TempDataObject data')
+        
+        return self._container
+    
+    @staticmethod
+    def STP(payload: SerializableType, version: int = 0, compression_info: tuple[int, int, int, int] | None = None) -> 'TempDataObject':
+        return TempDataObject(STPContainer(payload, version, compression_info))
+    
+    @staticmethod
+    def ITP(interpreterType: int | str, payload: bytes, interpretatorVersion: int = 0, compression_info: tuple[int, int, int, int] | None = None) -> 'TempDataObject':
+        return TempDataObject(ITPContainer(interpreterType, payload, interpretatorVersion, compression_info))
+    
+    def __repr__(self) -> str:
+        return f"<TempDataObject [{self._container}]>"
+
+class TempDataGroup:
+    __slots__ = ['objects']
+    def __init__(self, objects: list[TempDataObject] | None = None) -> None:
+        """
+        # Временная группа данных
+        """
+        self.objects = objects or []
+
 
 
 class GNRequest:
@@ -436,19 +579,24 @@ class GNRequest:
         self,
         method: str,
         url: Url,
-        payload: Optional[SerializableType] = None,
-        cookies: Optional[dict] = None,
-        transport: Optional[str] = None,
-        route: Optional[str] = None,
-        origin: Optional[str] = None
+        payload: TempDataObject | SerializableType | None = None,
+        cookies: dict | None = None,
+        transport: str | None = None,
+        route: str | None = None,
+        origin: str | None = None
     ):
         self._method: str = method
         self._url = url
-        self._payload = payload
         self._cookies: dict = cookies
         self._transport: str = transport
         self._route: str = route
         self._origin = origin
+
+        if isinstance(payload, TempDataObject):
+            self._tdo = payload
+        else:
+            tdo = TempDataObject.STP(payload)
+            self._tdo = tdo
 
         if self._cookies is None:
             self._cookies = {}
@@ -464,15 +612,17 @@ class GNRequest:
         """
         # Информация об объекте
 
-        Доступена только на сервере
+        `Доступена только на сервере`
         """
 
         self.client = self.__client(self)
         """
         # Информация о клиенте
 
-        Доступена только на сервере
+        `Доступена только на сервере`
         """
+
+        self.__raw_payload_cache: bytes | None = None
 
     class __object:
         def __init__(self, request: 'GNRequest') -> None:
@@ -548,7 +698,7 @@ class GNRequest:
             return self._data.get("object_type", 0)
         
         @property
-        def type(self) -> Union[Literal['user', 'service', 'gbn', 'company', 'project', 'app', 'doo'], str]:
+        def type(self) -> Literal['user', 'service', 'gbn', 'company', 'project', 'app', 'doo'] | str:
             """
             # Тип объекта
 
@@ -619,7 +769,7 @@ class GNRequest:
             return self._data.get("name", "")
         
         @property
-        def owner(self) -> Optional[int]:
+        def owner(self) -> int | None:
             """
             # `gwisid` владельца объекта
 
@@ -627,7 +777,7 @@ class GNRequest:
 
             Этот идентификатор используется для определения владельца объекта.
 
-            :return: Optional[int]
+            :return: int | None
             Если владелец не установлен, возвращает None.
             """
             return self._data.get("owner", None)
@@ -715,7 +865,7 @@ class GNRequest:
             return self._data['client-type']
 
         @property
-        def domain(self) -> Optional[str]:
+        def domain(self) -> str | None:
             """
             # Домен объекта
 
@@ -723,7 +873,7 @@ class GNRequest:
 
             `None`, если запрос не поддерживает подпись домена
             
-            :return: Optional[str]
+            :return: str | None
             """
             return self._data.get("domain", None)
 
@@ -733,11 +883,11 @@ class GNRequest:
 
         cookies = {}
 
-        if self._payload is not None:
-            payload = pack_payload(self.payload)
+        if self._tdo is not None:
+            payload = self._tdo.serialize()
         else:
             payload = None
-        
+
         
         if self._cookies is not None:
             cookies.update(self._cookies)
@@ -771,10 +921,13 @@ class GNRequest:
             cookies =  d['cookies']
             cookies = cast(dict, deserialize(cookies) if cookies is not None else None)
             
-            payload = cast(SerializableType, unpack_payload(d.get('payload')))
+            payload = cast(bytes | None, d.get('payload'))
+
+            if payload is not None:
+                payload = TempDataObject.deserialize(payload, unpack_container=False)
 
 
-            r = GNRequest(
+            return GNRequest(
                 transport=transport,
                 route=route,
                 method=method,
@@ -782,7 +935,6 @@ class GNRequest:
                 payload=payload,
                 cookies=cookies
             )
-            return r
         else:
             raise Exception(f'Unsupported GNRequest version: {version}')
 
@@ -802,11 +954,11 @@ class GNRequest:
         self.client._data['client-type'] = ct
 
     @property
-    def origin(self) -> Optional[str]:
+    def origin(self) -> str | None:
         """
         # url страницы с которой был сделан запрос
         
-        :return: Optional[str]
+        :return: str | None
         """
         return self._cookies.get("gn", {}).get('origin', None)
 
@@ -843,19 +995,7 @@ class GNRequest:
         self._url = url
 
     @property
-    def payload(self) -> Optional[SerializableType]:
-        """
-        # Полезная нагрузка запроса
-
-        `Dict`, `List`, `bytes`, `int`, `str` и другие типы с поддержкой байтов.
-
-        Все поддерживаемые типа описанны в `KeyisBTools.models.serialization.SerializableType`
-        
-        Если полезная нагрузка не установлена, возвращает None.
-        """
-        return self._payload
-
-    def setPayload(self, payload: Optional[dict]):
+    def payload(self) -> SerializableType | bytes | None:
         """
         # Полезная нагрузка запроса
 
@@ -863,13 +1003,40 @@ class GNRequest:
 
         Все поддерживаемые типа описанны в `KeyisBTools.models.serialization.SerializableType`
 
-        :param payload: Dict с поддержкой байтов.
+        Если полезная нагрузка в контейнере `TempDataObject` не распакована, контейнер будет распакован.
         """
-        self._payload = payload
+        if self.__raw_payload_cache is not None:
+            return self.__raw_payload_cache
+
+        if self._tdo is None or self._tdo.container is None:
+            return None
+
+        p = self._tdo.container.payload
+        self.__raw_payload_cache = p
+        return p
 
     @property
-    def cookies(self) -> Optional[dict]:
+    def tdo(self) -> TempDataObject | None:
+        """
+        # Временный объект данных запроса `TempDataObject`
+        """
+        if self._tdo is None:
+            return None
+        
+        return self._tdo
+
+    @tdo.setter
+    def tdo(self, value: TempDataObject | None):
+        self._tdo = value
+        self.__raw_payload_cache = None
+
+    @property
+    def cookies(self) -> dict | None:
         return self._cookies
+    
+    @cookies.setter
+    def cookies(self, value: dict | None):
+        self._cookies = value
 
     def setCookies(self, cookies: dict):
         self._cookies = cookies
@@ -891,7 +1058,7 @@ class GNRequest:
         """
         return self._transport
     
-    def setTransport(self, transport: Optional[str] = None):
+    def setTransport(self, transport: str | None = None):
         """
         Устанавливает `GN` протокол.
 
@@ -904,7 +1071,7 @@ class GNRequest:
         self._transport = transport
 
     @property
-    def route(self) -> Optional[str]:
+    def route(self) -> str | None:
         """
         # Маршрут запроса.
 
@@ -914,7 +1081,7 @@ class GNRequest:
         """
         return self._route
     
-    def setRoute(self, route: Optional[str] = None):
+    def setRoute(self, route: str | None = None):
         """
         # Маршрут запроса.
 
@@ -928,33 +1095,40 @@ class GNRequest:
 
 
     def __repr__(self):
-        return f"<GNRequest [{self._method} {self._url}] [{self._transport}]>"
+        return f"<GNRequest [{self._transport}]: [{self._method} {self._url}]>"
 
 class GNResponse(Exception):
     """
     # Ответ на запрос для сети `GN`
     """
     def __init__(self,
-                 command: Union[str, int, bool, bytes],
-                 payload: Optional[Union[SerializableType, 'TempDataObject']] = None,
-                 cookies: Optional[dict] = None
+                 command: str | int | bool | bytes,
+                 payload: SerializableType | 'TempDataObject' | None = None,
+                 cookies: dict | None = None
                  ):
-        
         """
-        # Ответ на запрос для сети `GN`
+        :param command: Команда ответа. `str`, `int`, `bool`, `bytes`.
+        :param payload: Полезная нагрузка ответа. Может быть `SerializableType` или `TempDataObject`. Все поддерживаемые типа описанны в `KeyisBTools.models.serialization.SerializableType`. `SerializableType` будет преобразован в `TempDataObject` при сборке.
+        :param cookies: `dict`. Метаданные ответа.
         """
         self._command = command
-        self._payload = payload
         self._cookies = cookies
         self.command = CommandObject(command)
         """
         # Команда запроса `CommandObject`
         """
 
-    def assembly(self):
+        self._tdo: TempDataObject | None = None
 
-        
-        self._payload = pack_payload(self.payload)
+        if isinstance(payload, TempDataObject):
+            self._tdo = payload
+        else:
+            tdo = TempDataObject.STP(payload)
+            self._tdo = tdo
+
+        self.__raw_payload_cache: SerializableType | None = None
+
+    def assembly(self): ... # legacy
         
 
     def serialize(self) -> bytes:
@@ -966,9 +1140,8 @@ class GNResponse(Exception):
         return pack_gnresponse(
             version=0,
             command=self._command,
-            payload=cast(bytes, self._payload),
+            payload=cast(TempDataObject, self._tdo).serialize(),
             cookies=cookies
-
         )
     
     @staticmethod
@@ -978,103 +1151,62 @@ class GNResponse(Exception):
         cookies =  u['cookies']
         cookies = cast(dict, deserialize(cookies)) if cookies is not None else None
         
-        payload = unpack_payload(u.get('payload'))
+        payload = TempDataObject.deserialize(u['payload'], unpack_container=False) if u.get('payload') is not None else None
         
         return GNResponse(
             command=u['command'],
-            payload=payload, # type: ignore
+            payload=payload,
             cookies=cookies
         )
     
     @property
-    def payload(self) -> Optional[Union[SerializableType, 'TempDataObject']]:
-        return self._payload
+    def tdo(self) -> TempDataObject | None:
+        if self._tdo is None:
+            return None
+        
+        return self._tdo
+
+    @tdo.setter
+    def tdo(self, value: TempDataObject | None):
+        self._tdo = value
+        self.__raw_payload_cache = None
     
     @property
-    def cookies(self) -> Optional[dict]:
+    def payload(self) -> SerializableType | bytes | None:
+        """
+        # Полезная нагрузка ответа
+        Если полезная нагрузка в контейнере `TempDataObject` не распакована, контейнер будет распакован.
+        """
+        if self.__raw_payload_cache is not None:
+            return self.__raw_payload_cache
+
+        if self._tdo is None or self._tdo.container is None:
+            return None
+
+        p = self._tdo.container.payload
+        self.__raw_payload_cache = p
+        return p
+    
+    @payload.setter
+    def payload(self, value: SerializableType | bytes | None):
+        raise Exception("Use tdo to set payload as TempDataObject")
+    
+    @property
+    def cookies(self) -> dict | None:
         return self._cookies
+    
+    @cookies.setter
+    def cookies(self, value: dict | None):
+        self._cookies = value
     
     def __repr__(self):
         return f"<GNResponse [{self._command}]>"
     
     def __str__(self) -> str:
-        return f"[GNResponse]: {self._command} {self._payload}"
-    
+        return f"[GNResponse]: {self._command} {self._tdo}"
 
-
-
-class TempDataObject:
-    __slots__ = ['container']
-
-    @overload
-    def __init__(self,
-                interpreterType: Union[int, str],
-                interpretatorVersion: int,
-                payload: bytes
-    ) -> None: ...
-
-    @overload
-    def __init__(self,
-                interpreterType: Union[int, str],
-                interpretatorVersion: int,
-                payload: bytes,
-                compression_info: Optional[Tuple[int, int, int, int]] = None
-    ) -> None: ...
-
-    @overload
-    def __init__(self,
-                container: Optional[bytes] = None
-    ) -> None: ...
-    
-    def __init__(self, *args, **kwargs) -> None:
-        self.container = None
-
-        if 'container' in kwargs or len(args) == 1:
-            self.container = kwargs.get('container', args[0] if args else None)
-            return
-
-        interpreterType = kwargs.get('interpreterType', args[0] if len(args) > 0 else None)
-        interpretatorVersion = kwargs.get('interpretatorVersion', args[1] if len(args) > 1 else None)
-        payload = kwargs.get('payload', args[2] if len(args) > 2 else None)
-        compression_info = kwargs.get('compression_info', args[3] if len(args) > 3 else None)
-
-        self.setPayloadITP(interpreterType, interpretatorVersion, payload, compression_info) # type: ignore
-
-    def setPayloadITP(self, interpreterType: Union[int, str], interpretatorVersion: int, payload: bytes, compression_info: Optional[Tuple[int, int, int, int]] = None):
-        """
-            Устанавливает полезную нагрузку в формате ITP (Interpretable Temporary Payload) для данного объекта.
-        :param interpreterType: Тип интерпретатора. Например, `js`, `html`, `py` и т.д. (как mime-type в http).
-        :param interpretatorVersion: Версия интерпретатора. Например, `1`, `2` и т.д.
-        :param payload: Полезная нагрузка в виде байтов, которая будет упакована в формате ITP (Interpreted Temporary Payload) для использования с данным типом интерпретатора и версией.
-        
-        """
-        self.container = _Aracada_container_packer.encode_itp(payload, interpreterType, interpretatorVersion, compression_info)
-    
-    def getPayloadITP(self) -> Optional[Tuple[Union[int, str], int, bytes]]:
-        """
-        Получает полезную нагрузку в формате ITP (Interpreted Temporary Payload) из данного объекта.
-
-        :return: Кортеж, содержащий тип интерпретатора (например, `js`, `html`, `py` и т.д.), версию интерпретатора (например, `1`, `2` и т.д.) и полезную нагрузку в виде байтов, которая была упакована в формате ITP для использования с данным типом интерпретатора и версией. Если контейнер не установлен или не содержит данных в формате ITP, возвращает None.
-        """
-        print(f'Getting ITP payload from TempDataObject with container: {self.container}')
-        if self.container is None:
-            return None
-        print(f'Decoding ITP payload from TempDataObject with container size: {len(self.container)} bytes')
-        r = _Aracada_container_packer.decode_itp(self.container)
-        print(f'Decoded ITP payload: {r}')
-        return r
-
-
-class TempDataGroup:
-    __slots__ = ['objects']
-    def __init__(self, objects: Optional[List[TempDataObject]] = None) -> None:
-        """
-        # Временная группа данных
-        """
-        self.objects = objects or []
 
 from .fastcommands import AllGNFastCommands, COMMAND_TREE, COMMAND_PREFIX
-
 
 class _CommandPath:
     def __init__(self, cmdobj: "CommandObject", path: tuple[str, ...]):
