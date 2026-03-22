@@ -483,7 +483,10 @@ class TempDataObject:
         self._container = None
 
         if 'container' in kwargs or len(args) == 1:
-            self._container = kwargs.get('container', args[0] if args else None)
+            container = kwargs.get('container', args[0] if args else None)
+            if isinstance(container, (bytearray, memoryview)):
+                container = bytes(container)
+            self._container = container
             return
 
         interpreterType = kwargs.get('interpreterType', args[0] if len(args) > 0 else None)
@@ -496,7 +499,9 @@ class TempDataObject:
                 interpretatorVersion = 0
             self._container = ITPContainer(interpreterType, payload, interpretatorVersion, compression_info)
 
-    def setContainer(self, container: STPContainer | ITPContainer):
+    def setContainer(self, container: STPContainer | ITPContainer | bytes):
+        if isinstance(container, (bytearray, memoryview)):
+            container = bytes(container)
         self._container = container
     
     def serialize(self) -> bytes | None:
@@ -507,7 +512,8 @@ class TempDataObject:
         if self._container is None:
             return None
         
-        if isinstance(self._container, bytes):
+        if isinstance(self._container, (bytes, bytearray, memoryview)):
+            self._container = bytes(self._container)
             return self._container
         return self._container.serialize()
     
@@ -521,7 +527,7 @@ class TempDataObject:
         if self._container is None:
             return None
 
-        if isinstance(self._container, bytes):
+        if isinstance(self._container, (bytes, bytearray, memoryview)):
             self._unpack_container()
         
         return self._container # type: ignore
@@ -539,7 +545,8 @@ class TempDataObject:
         if self._container is None:
             raise ValueError('TempDataObject container is None')
         
-        if isinstance(self._container, bytes):
+        if isinstance(self._container, (bytes, bytearray, memoryview)):
+            self._container = bytes(self._container)
             t = int.from_bytes(self._container[0:2], "big")
             if t == 1:  # ITP
                 self._container = ITPContainer.deserialize(self._container)
@@ -909,6 +916,7 @@ class GNRequest:
 
     @staticmethod
     def deserialize(data: bytes) -> 'GNRequest':
+        data = bytes(data)
         d = unpack_gnrequest(data)
 
         version =  d['version']
@@ -1146,6 +1154,7 @@ class GNResponse(Exception):
     
     @staticmethod
     def deserialize(data: bytes) -> 'GNResponse':
+        data = bytes(data)
         u = unpack_gnresponse(data)
         
         cookies =  u['cookies']
