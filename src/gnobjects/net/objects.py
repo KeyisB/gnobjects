@@ -566,7 +566,7 @@ class TempDataObject:
         return TempDataObject(ITPContainer(interpreterType, payload, interpretatorVersion, compression_info))
     
     def __repr__(self) -> str:
-        return f"<TempDataObject [{self._container}]>"
+        return f"<TempDataObject [{self._container.payload if self._container else None}]>"
 
 class TempDataGroup:
     __slots__ = ['objects']
