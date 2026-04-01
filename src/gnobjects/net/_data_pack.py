@@ -110,6 +110,30 @@ def pack_gnrequest(
     else:
         raise ValueError('Unsupported version')
 
+
+def pack_gnrequest_header(
+                 version: int,
+                 transport: str,
+                 route: str,
+                 method: str,
+                 url: bytes,
+                 payload_length: Optional[int],
+                 cookies: Optional[bytes]
+                 ) -> bytes:
+
+    if version == 0:
+        return pack_gnrequest_header_v0(
+            version,
+            transport,
+            route,
+            method,
+            url,
+            payload_length,
+            cookies
+        )
+    else:
+        raise ValueError('Unsupported version')
+
 def unpack_gnrequest(data: bytes) -> dict:
     if len(data) == 0:
         raise ValueError("Empty data")
@@ -141,6 +165,31 @@ def pack_gnrequest_v0(
                  method: str,
                  url: bytes,
                  payload: Optional[bytes],
+                 cookies: Optional[bytes]
+                 ) -> bytes:
+    header = pack_gnrequest_header_v0(
+        version,
+        transport,
+        route,
+        method,
+        url,
+        len(payload) if payload is not None else None,
+        cookies,
+    )
+
+    if payload is None:
+        return header
+
+    return header + payload
+
+
+def pack_gnrequest_header_v0(
+                 version: int,
+                 transport: str,
+                 route: str,
+                 method: str,
+                 url: bytes,
+                 payload_length: Optional[int],
                  cookies: Optional[bytes]
                  ) -> bytes:
     
@@ -253,7 +302,7 @@ def pack_gnrequest_v0(
     b3 = 0
 
     # payload is
-    if payload is not None:
+    if payload_length is not None:
         b3 |= (1 << 7)
     
     # cookies is
@@ -312,9 +361,8 @@ def pack_gnrequest_v0(
     
 
     # payload
-    if payload is not None:
-        payload_b = payload
-        body += payload_b
+    if payload_length is not None:
+        body += encode_varlen_2358(payload_length)
 
 
     blob += body
@@ -462,11 +510,18 @@ def unpack_gnrequest_v0(data: bytes) -> dict:
         cookies = data[pos:pos + c_len]
         pos += c_len
 
-    # === 9) Payload (оставшиеся данные) ===
+    # === 9) Payload ===
     payload = None
     if payload_present:
-        payload = data[pos:total_len]
-        pos = total_len
+        p_len, p_len_size = decode_varlen_2358(data[pos:])
+        pos += p_len_size
+
+        ensure(p_len)
+        payload = data[pos:pos + p_len]
+        pos += p_len
+
+    if pos != total_len:
+        raise ValueError("Trailing bytes")
 
     # === 10) Результат ===
     return {
@@ -615,6 +670,12 @@ def unpack_gnrequest_header_v0(data: bytes) -> Tuple[dict, int]:
         cookies = data[pos:pos + c_len]
         pos += c_len
 
+    payload_length = 0
+    if payload_present:
+        p_len, p_len_size = decode_varlen_2358(data[pos:])
+        payload_length = p_len
+        pos += p_len_size
+
     return {
         'version': version,
         'transport': transport,
@@ -623,6 +684,7 @@ def unpack_gnrequest_header_v0(data: bytes) -> Tuple[dict, int]:
         'url': url,
         'cookies': cookies,
         'payload_present': payload_present,
+        'payload_length': payload_length,
     }, pos
 
 # ===== gnrequest =====
@@ -773,6 +835,8 @@ def pack_temp_data_object_v0(
     # ========= b2 (optional) =========
     # only if inType_mode == "standard"
     if inType_mode == "standard":
+        if inType is None:
+            raise ValueError('inType is required for standard mode')
         blob.append(common_inTypes[inType])  # 1 byte
 
     # ========= b4: length types =========
@@ -1236,6 +1300,24 @@ def pack_gnresponse(
     else:
         raise ValueError('Unsupported version')
 
+
+def pack_gnresponse_header(
+                    version: int,
+                    command: Union[str, int, bool, bytes, bytearray, memoryview],
+                    payload_length: Optional[int],
+                    cookies: Optional[bytes]
+                 ) -> bytes:
+
+    if version == 0:
+        return pack_gnresponse_header_v0(
+            version,
+            command,
+            payload_length,
+            cookies
+        )
+    else:
+        raise ValueError('Unsupported version')
+
 def unpack_gnresponse(data: bytes) -> dict:
     if len(data) == 0:
         raise ValueError("Empty data")
@@ -1258,6 +1340,83 @@ def unpack_gnresponse_header(data: bytes) -> Tuple[dict, int, Optional[int]]:
         return unpack_gnresponse_header_v0(data)
     else:
         raise ValueError('Unsupported version')
+
+
+def unpack_temp_data_header(data: bytes) -> Tuple[dict, int]:
+    if len(data) < 2:
+        raise IncompleteGNFrameError("Data too short for container header")
+
+    container_type = int.from_bytes(data[0:2], "big")
+    if container_type == 1:
+        return unpack_itp_header(data)
+    if container_type == 2:
+        return unpack_stp_header(data)
+    raise ValueError(f"Unsupported container type: {container_type}")
+
+
+def unpack_itp_header(data: bytes) -> Tuple[dict, int]:
+    if len(data) < 4:
+        raise IncompleteGNFrameError("Data too short for ITP header")
+
+    interpretator_type = int.from_bytes(data[2:4], "big")
+    pos = 4
+
+    if interpretator_type == 0:
+        raise ValueError("Invalid interpretator type 0")
+    elif interpretator_type == 1:
+        try:
+            raw_type, size = decode_data_with_len(data[pos:], '1248')
+        except ValueError as exc:
+            raise IncompleteGNFrameError(str(exc)) from exc
+        interpreter_type: int | str = raw_type.decode('utf-8')
+        pos += size
+    else:
+        if interpretator_type not in _rev_inTypes:
+            raise ValueError(f"Unknown standard interpretator code: {interpretator_type}")
+        interpreter_type = _rev_inTypes[interpretator_type]
+
+    try:
+        interpretator_version, size = decode_varlen_1248(data[pos:])
+    except (ValueError, IndexError) as exc:
+        raise IncompleteGNFrameError(str(exc)) from exc
+    pos += size
+
+    if len(data) <= pos:
+        raise IncompleteGNFrameError("Data too short for ITP compression header")
+
+    compression_info = unpack_byte_1_1_4_2(data[pos])
+    pos += 1
+
+    return {
+        'container_type': 1,
+        'interpreterType': interpreter_type,
+        'interpretatorVersion': interpretator_version,
+        'compression_info': compression_info,
+    }, pos
+
+
+def unpack_stp_header(data: bytes) -> Tuple[dict, int]:
+    if len(data) < 2:
+        raise IncompleteGNFrameError("Data too short for STP header")
+
+    pos = 2
+    try:
+        interpretator_version, size = decode_varlen_1248(data[pos:])
+    except (ValueError, IndexError) as exc:
+        raise IncompleteGNFrameError(str(exc)) from exc
+    pos += size
+
+    if len(data) <= pos:
+        raise IncompleteGNFrameError("Data too short for STP compression header")
+
+    compression_info = unpack_byte_1_1_4_2(data[pos])
+    pos += 1
+
+    return {
+        'container_type': 2,
+        'interpretatorVersion': interpretator_version,
+        'compression_info': compression_info,
+    }, pos
 
 
 
@@ -1300,6 +1459,25 @@ def pack_gnresponse_v0(
     payload: Optional[bytes],
     cookies: Optional[bytes],
 ) -> bytes:
+    header = pack_gnresponse_header_v0(
+        version,
+        command,
+        len(payload) if payload is not None else None,
+        cookies,
+    )
+
+    if payload is None:
+        return header
+
+    return header + payload
+
+
+def pack_gnresponse_header_v0(
+    version: int,
+    command: Union[str, int, bool, bytes, bytearray, memoryview],
+    payload_length: Optional[int],
+    cookies: Optional[bytes],
+) -> bytes:
     if not (0 <= version <= 3):
         raise ValueError("Version must be between 0 and 3")
 
@@ -1309,15 +1487,21 @@ def pack_gnresponse_v0(
         if len(x) >= (1 << 62):
             raise ValueError(f"{name} too large (>= 2^62)")
 
-    _check_len(payload, "payload")
+    def _check_size(x: Optional[int], name: str) -> None:
+        if x is None:
+            return
+        if x < 0 or x >= (1 << 62):
+            raise ValueError(f"{name} too large (>= 2^62)")
+
     _check_len(cookies, "cookies")
+    _check_size(payload_length, "payload")
 
     out = bytearray()
 
     b0 = (version & 0x03) << 6
 
     has_cookies = cookies is not None
-    has_payload = payload is not None
+    has_payload = payload_length is not None
     if has_cookies:
         b0 |= (1 << 3)
     if has_payload:
@@ -1385,8 +1569,7 @@ def pack_gnresponse_v0(
         out.extend(cookies)  # type: ignore[arg-type]
 
     if has_payload:
-        out.extend(__encode_varint62(len(payload)))  # type: ignore[arg-type]
-        out.extend(payload)  # type: ignore[arg-type]
+        out.extend(__encode_varint62(payload_length))  # type: ignore[arg-type]
 
     return bytes(out)
 
@@ -1418,7 +1601,7 @@ def unpack_gnresponse_v0(buf: bytes) -> dict:
     has_payload_bit = bool((b0 >> 2) & 1)
     nibble = b0 & 0x0F
 
-    res = {"version": version, "command_type": ctype, "cookies": None, "payload": None}
+    res: dict[str, Any] = {"version": version, "command_type": ctype, "cookies": None, "payload": None}
 
     if ctype == 0b00:  # bool
         res["command"] = bool((b0 >> 1) & 1)
@@ -1532,7 +1715,7 @@ def unpack_gnresponse_header_v0(buf: bytes) -> Tuple[dict, int, Optional[int]]:
     has_payload = bool((b0 >> 2) & 1)
     nibble = b0 & 0x0F
 
-    res = {"version": version, "command_type": ctype, "cookies": None, "payload": None}
+    res: dict[str, Any] = {"version": version, "command_type": ctype, "cookies": None, "payload": None}
 
     inline_command = (not has_cookies) and (not has_payload) and nibble != 0x0F
 

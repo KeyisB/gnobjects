@@ -1,7 +1,8 @@
 import re
 import os
 import ast
-from typing import Optional, Dict, Any, List, Union, Literal, Tuple, cast, overload
+import asyncio
+from typing import Optional, Dict, Any, List, Union, Literal, Tuple, cast, overload, AsyncIterable, AsyncGenerator
 import anyio
 from pathlib import Path
 
@@ -11,11 +12,14 @@ from .gnTransportProtocolParser import GNTransportProtocol, parse_gn_protocol
 from .values import tablex_file_extension_to_inType
 from ._data_pack import (
     pack_gnrequest,
+    pack_gnrequest_header,
     unpack_gnrequest,
     unpack_gnrequest_header,
     pack_gnresponse,
+    pack_gnresponse_header,
     unpack_gnresponse,
     unpack_gnresponse_header,
+    unpack_temp_data_header,
     IncompleteGNFrameError,
     _Aracada_container_packer
     )
@@ -569,7 +573,7 @@ class TempDataObject:
         return TempDataObject(ITPContainer(interpreterType, payload, interpretatorVersion, compression_info))
     
     def __repr__(self) -> str:
-        return f"<TempDataObject [{self._container.payload if self._container else None}]>"
+        return "<TempDataObject>"
 
 class TempDataGroup:
     __slots__ = ['objects']
@@ -578,6 +582,237 @@ class TempDataGroup:
         # Временная группа данных
         """
         self.objects = objects or []
+
+
+_PAYLOAD_NOT_READY = object()
+
+
+class _AsyncPayloadState:
+    __slots__ = [
+        'payloadSize', '_payload', '_payload_complete', '_payload_incomplete', '_waiters',
+        '_container_header', '_container_header_len', '_container_waiters', '_failure'
+    ]
+
+    def __init__(self, payload_size: int = 0, initial_payload: bytes | None = None, complete: bool = False) -> None:
+        self.payloadSize = payload_size
+        self._payload = bytearray(initial_payload or b'')
+        self._payload_complete = False
+        self._payload_incomplete = False
+        self._waiters: list[asyncio.Future[None]] = []
+        self._container_header: object | STPContainer | ITPContainer | None = _PAYLOAD_NOT_READY
+        self._container_header_len: Optional[int] = None
+        self._container_waiters: list[asyncio.Future[None]] = []
+        self._failure: Optional[Exception] = None
+
+        if self._payload:
+            self._try_parse_container_header()
+
+        if complete:
+            self.finish(True)
+
+    @property
+    def payloadReady(self) -> bool:
+        return self._payload_complete
+
+    @property
+    def payloadComplete(self) -> bool:
+        return self._payload_complete
+
+    @property
+    def payloadIncomplete(self) -> bool:
+        return self._payload_incomplete
+
+    @property
+    def currentPayload(self) -> bytes:
+        return bytes(self._payload)
+
+    @property
+    def headerReady(self) -> bool:
+        return self._container_header is not _PAYLOAD_NOT_READY
+
+    @property
+    def containerHeaderLength(self) -> Optional[int]:
+        return self._container_header_len
+
+    def feed(self, data: bytes | bytearray | memoryview) -> None:
+        if self._payload_complete or self._payload_incomplete:
+            return
+
+        chunk = bytes(data)
+        if not chunk:
+            return
+
+        self._payload.extend(chunk)
+
+        if len(self._payload) > self.payloadSize:
+            self._failure = ValueError('Payload exceeds declared payloadSize')
+
+        self._try_parse_container_header()
+        self._notify_all()
+
+    def fail(self, exc: Exception) -> None:
+        self._failure = exc
+        self._payload_incomplete = True
+        self._notify_all()
+
+    def finish(self, end_stream: bool) -> None:
+        if not end_stream:
+            self._payload_incomplete = True
+            self._notify_all()
+            return
+
+        if len(self._payload) != self.payloadSize:
+            self._payload_incomplete = True
+        else:
+            self._payload_complete = True
+
+        self._try_parse_container_header()
+        self._notify_all()
+
+    def _notify_all(self) -> None:
+        waiters = self._waiters
+        self._waiters = []
+        for fut in waiters:
+            if not fut.done():
+                fut.set_result(None)
+
+        if self._container_header is not _PAYLOAD_NOT_READY or self._payload_incomplete or self._failure is not None:
+            waiters = self._container_waiters
+            self._container_waiters = []
+            for fut in waiters:
+                if not fut.done():
+                    fut.set_result(None)
+
+    def _raise_failure(self) -> None:
+        if self._failure is not None:
+            raise self._failure
+
+    def _try_parse_container_header(self) -> None:
+        if self._container_header is not _PAYLOAD_NOT_READY:
+            return
+
+        if self.payloadSize == 0:
+            self._container_header = None
+            self._container_header_len = 0
+            return
+
+        try:
+            header, header_len = unpack_temp_data_header(bytes(self._payload))
+        except IncompleteGNFrameError:
+            return
+        except Exception as exc:
+            self._failure = exc
+            return
+
+        if header['container_type'] == 1:
+            container: STPContainer | ITPContainer = ITPContainer(
+                header['interpreterType'],
+                b'',
+                header['interpretatorVersion'],
+                header['compression_info']
+            )
+        elif header['container_type'] == 2:
+            container = STPContainer(b'', header['interpretatorVersion'], header['compression_info'])
+        else:
+            self._failure = ValueError(f"Unsupported container type: {header['container_type']}")
+            return
+
+        self._container_header = container
+        self._container_header_len = header_len
+
+    async def _wait_for_progress(self, container_wait: bool = False) -> None:
+        self._raise_failure()
+
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[None] = loop.create_future()
+        waiters = self._container_waiters if container_wait else self._waiters
+        waiters.append(fut)
+
+        self._raise_failure()
+        await fut
+        self._raise_failure()
+
+    async def get_raw_payload(self) -> Optional[bytes]:
+        while True:
+            self._raise_failure()
+            if self._payload_complete:
+                return bytes(self._payload)
+            if self._payload_incomplete:
+                return None
+            await self._wait_for_progress()
+
+    async def get_container_header(self) -> Optional[STPContainer | ITPContainer]:
+        while True:
+            self._raise_failure()
+            if self._container_header is not _PAYLOAD_NOT_READY:
+                return cast(Optional[STPContainer | ITPContainer], self._container_header)
+            if self._payload_incomplete:
+                return None
+            await self._wait_for_progress(container_wait=True)
+
+    async def iter_bytes(self, chunk_size: int, *, require_container_header: bool, payload_only: bool) -> AsyncGenerator[Optional[bytes], None]:
+        if chunk_size <= 0:
+            raise ValueError('chunk_size must be > 0')
+
+        offset = 0
+        if require_container_header or payload_only:
+            header = await self.get_container_header()
+            if header is None:
+                yield None
+                return
+            if payload_only:
+                offset = cast(int, self._container_header_len)
+
+        while True:
+            self._raise_failure()
+            available = len(self._payload)
+
+            while available - offset >= chunk_size:
+                end = offset + chunk_size
+                yield bytes(self._payload[offset:end])
+                offset = end
+                available = len(self._payload)
+
+            if self._payload_complete:
+                if available > offset:
+                    yield bytes(self._payload[offset:available])
+                return
+
+            if self._payload_incomplete:
+                if available > offset:
+                    yield bytes(self._payload[offset:available])
+                yield None
+                return
+
+            await self._wait_for_progress()
+
+
+class _PayloadIterProxy:
+    __slots__ = ['_state']
+
+    def __init__(self, state: _AsyncPayloadState) -> None:
+        self._state = state
+
+    @property
+    def header(self):
+        return self._state.get_container_header()
+
+    @property
+    def currentPayload(self) -> bytes:
+        return self._state.currentPayload
+
+    def raw(self, chunk_size: int) -> AsyncGenerator[Optional[bytes], None]:
+        return self._state.iter_bytes(chunk_size, require_container_header=False, payload_only=False)
+
+    def tdo(self, chunk_size: int) -> AsyncGenerator[Optional[bytes], None]:
+        return self._state.iter_bytes(chunk_size, require_container_header=True, payload_only=False)
+
+    def payload(self, chunk_size: int) -> AsyncGenerator[Optional[bytes], None]:
+        return self._state.iter_bytes(chunk_size, require_container_header=True, payload_only=True)
+
+
+def _is_async_payload_source(value: Any) -> bool:
+    return hasattr(value, '__aiter__') and not isinstance(value, (bytes, bytearray, memoryview, TempDataObject))
 
 
 
@@ -589,11 +824,12 @@ class GNRequest:
         self,
         method: str,
         url: Url,
-        payload: TempDataObject | SerializableType | None = None,
+        payload: TempDataObject | SerializableType | AsyncIterable[bytes] | None = None,
         cookies: dict | None = None,
         transport: str | None = None,
         route: str | None = None,
-        origin: str | None = None
+        origin: str | None = None,
+        lenPayload: Optional[int] = None
     ):
         self._method: str = method
         self._url = url
@@ -602,11 +838,27 @@ class GNRequest:
         self._route: str = route
         self._origin = origin
 
-        if isinstance(payload, TempDataObject):
-            self._tdo = payload
+        self._tdo: TempDataObject | None = None
+        self._payload_source: Optional[AsyncIterable[bytes]] = None
+        self._payload_source_consumed = False
+
+        if _is_async_payload_source(payload):
+            if lenPayload is None:
+                raise ValueError('lenPayload is required for async payload sources')
+            self._payload_source = cast(AsyncIterable[bytes], payload)
+            self._payload_state = _AsyncPayloadState(payload_size=lenPayload)
         else:
-            tdo = TempDataObject.STP(payload)
-            self._tdo = tdo
+            if isinstance(payload, TempDataObject):
+                self._tdo = payload
+            else:
+                self._tdo = TempDataObject.STP(cast(SerializableType, payload))
+
+            raw_payload = self._tdo.serialize() if self._tdo is not None else None
+            self._payload_state = _AsyncPayloadState(
+                payload_size=len(raw_payload or b''),
+                initial_payload=raw_payload,
+                complete=True
+            )
 
         if self._cookies is None:
             self._cookies = {}
@@ -633,6 +885,7 @@ class GNRequest:
         """
 
         self.__raw_payload_cache: bytes | None = None
+        self.iter = _PayloadIterProxy(self._payload_state)
 
     class __object:
         def __init__(self, request: 'GNRequest') -> None:
@@ -888,24 +1141,20 @@ class GNRequest:
             return self._data.get("domain", None)
 
     def serialize(self, version: int = 0) -> bytes:
-        if self._transport is None: self.setTransport()
-        if self._route is None: self.setRoute()
+        if self._payload_source is not None and not self._payload_source_consumed:
+            raise TypeError('Async payload source requires async send path')
+
+        if self._transport is None:
+            self.setTransport()
+        if self._route is None:
+            self.setRoute()
 
         cookies = {}
-
-        if self._tdo is not None:
-            payload = self._tdo.serialize()
-        else:
-            payload = None
-
-        
         if self._cookies is not None:
             cookies.update(self._cookies)
 
-        if cookies != {}:
-            raw_cookies = serialize(cookies)
-        else:
-            raw_cookies = None
+        raw_cookies = serialize(cookies) if cookies != {} else None
+        payload = self._tdo.serialize() if self._tdo is not None else self._payload_state.currentPayload
 
         return pack_gnrequest(
             version,
@@ -916,6 +1165,87 @@ class GNRequest:
             payload,
             raw_cookies
         )
+
+    def serializeHeader(self, version: int = 0) -> bytes:
+        if self._transport is None:
+            self.setTransport()
+        if self._route is None:
+            self.setRoute()
+
+        cookies = {}
+        if self._cookies is not None:
+            cookies.update(self._cookies)
+        raw_cookies = serialize(cookies) if cookies != {} else None
+
+        return pack_gnrequest_header(
+            version,
+            self._transport,
+            self._route,
+            self._method,
+            self.url.toString().encode(),
+            self.lenPayload,
+            raw_cookies
+        )
+
+    async def _materialize_payload_source(self) -> Optional[bytes]:
+        if self._payload_source is None or self._payload_source_consumed:
+            return await self._payload_state.get_raw_payload()
+
+        total = 0
+        try:
+            async for chunk in self._payload_source:
+                if not isinstance(chunk, (bytes, bytearray, memoryview)):
+                    raise TypeError('Async payload source must yield bytes')
+                blob = bytes(chunk)
+                total += len(blob)
+                self._payload_state.feed(blob)
+
+            self._payload_source_consumed = True
+            if total != self._payload_state.payloadSize:
+                raise ValueError('Async payload source length does not match lenPayload')
+            self._payload_state.finish(True)
+        except Exception as exc:
+            self._payload_source_consumed = True
+            self._payload_state.fail(exc)
+            raise
+
+        raw = self._payload_state.currentPayload
+        self.setSerializedPayload(raw)
+        return raw
+
+    async def iterSerializedPayload(self) -> AsyncGenerator[bytes, None]:
+        if self._payload_source is None:
+            raw = self._tdo.serialize() if self._tdo is not None else self._payload_state.currentPayload
+            if raw:
+                yield raw
+            return
+
+        if self._payload_source_consumed:
+            raw = self._payload_state.currentPayload
+            if raw:
+                yield raw
+            return
+
+        total = 0
+        try:
+            async for chunk in self._payload_source:
+                if not isinstance(chunk, (bytes, bytearray, memoryview)):
+                    raise TypeError('Async payload source must yield bytes')
+                blob = bytes(chunk)
+                total += len(blob)
+                self._payload_state.feed(blob)
+                yield blob
+
+            self._payload_source_consumed = True
+            if total != self._payload_state.payloadSize:
+                raise ValueError('Async payload source length does not match lenPayload')
+            self._payload_state.finish(True)
+        except Exception as exc:
+            self._payload_source_consumed = True
+            self._payload_state.fail(exc)
+            raise
+
+        self.setSerializedPayload(self._payload_state.currentPayload)
 
     @staticmethod
     def deserialize(data: bytes) -> 'GNRequest':
@@ -950,7 +1280,7 @@ class GNRequest:
             raise Exception(f'Unsupported GNRequest version: {version}')
 
     @staticmethod
-    def try_deserialize_header(data: bytes) -> Optional[Tuple['GNRequest', int, bool]]:
+    def try_deserialize_header(data: bytes) -> Optional[Tuple['GNRequest', int, int]]:
         try:
             d, payload_offset = unpack_gnrequest_header(bytes(data))
         except IncompleteGNFrameError:
@@ -963,18 +1293,32 @@ class GNRequest:
             route=d['route'],
             method=d['method'],
             url=Url(d['url'].decode()),
-            payload=None,
+            payload=TempDataObject(container=None),
             cookies=cookies
         )
-        request.tdo = None
+        request._tdo = None
+        request.__raw_payload_cache = None
+        request._payload_state = _AsyncPayloadState(payload_size=int(d.get('payload_length', 0)))
+        request.iter = _PayloadIterProxy(request._payload_state)
 
-        return request, payload_offset, bool(d.get('payload_present'))
+        return request, payload_offset, int(d.get('payload_length', 0))
 
     def setSerializedPayload(self, payload: bytes | bytearray | memoryview | None):
         if payload is None:
-            self.tdo = None
+            self._tdo = None
+            self.__raw_payload_cache = None
             return
-        self.tdo = TempDataObject.deserialize(bytes(payload), unpack_container=False)
+        blob = bytes(payload)
+        self._tdo = TempDataObject.deserialize(blob, unpack_container=False)
+        self.__raw_payload_cache = None
+
+    def _feedIncomingPayload(self, payload: bytes | bytearray | memoryview) -> None:
+        self._payload_state.feed(payload)
+
+    def _finishIncomingPayload(self, end_stream: bool) -> None:
+        self._payload_state.finish(end_stream)
+        if self._payload_state.payloadComplete:
+            self.setSerializedPayload(self._payload_state.currentPayload)
 
     def _assembly_server(self):
         d: str = self.client._data['domain']
@@ -1033,7 +1377,7 @@ class GNRequest:
         self._url = url
 
     @property
-    def payload(self) -> SerializableType | bytes | None:
+    def payload(self):
         """
         # Полезная нагрузка запроса
 
@@ -1043,8 +1387,22 @@ class GNRequest:
 
         Если полезная нагрузка в контейнере `TempDataObject` не распакована, контейнер будет распакован.
         """
+        return self._get_payload()
+
+    async def _get_payload(self) -> SerializableType | bytes | None:
         if self.__raw_payload_cache is not None:
             return self.__raw_payload_cache
+
+        if self._payload_source is not None and not self._payload_source_consumed:
+            raw = await self._materialize_payload_source()
+            if raw is None:
+                return None
+
+        elif self._tdo is None:
+            raw = await self._payload_state.get_raw_payload()
+            if raw is None:
+                return None
+            self.setSerializedPayload(raw)
 
         if self._tdo is None or self._tdo.container is None:
             return None
@@ -1054,19 +1412,47 @@ class GNRequest:
         return p
 
     @property
-    def tdo(self) -> TempDataObject | None:
+    def tdo(self):
         """
         # Временный объект данных запроса `TempDataObject`
         """
-        if self._tdo is None:
-            return None
-        
+        return self._get_tdo()
+
+    async def _get_tdo(self) -> TempDataObject | None:
+        if self._payload_source is not None and not self._payload_source_consumed:
+            raw = await self._materialize_payload_source()
+            if raw is None:
+                return None
+
+        elif self._tdo is None:
+            raw = await self._payload_state.get_raw_payload()
+            if raw is None:
+                return None
+            self.setSerializedPayload(raw)
+
         return self._tdo
 
     @tdo.setter
     def tdo(self, value: TempDataObject | None):
         self._tdo = value
         self.__raw_payload_cache = None
+        raw_payload = value.serialize() if value is not None else None
+        self._payload_source = None
+        self._payload_source_consumed = False
+        self._payload_state = _AsyncPayloadState(
+            payload_size=len(raw_payload or b''),
+            initial_payload=raw_payload,
+            complete=True
+        )
+        self.iter = _PayloadIterProxy(self._payload_state)
+
+    @property
+    def payloadSize(self) -> int:
+        return self._payload_state.payloadSize
+
+    @property
+    def lenPayload(self) -> int:
+        return self._payload_state.payloadSize
 
     @property
     def cookies(self) -> dict | None:
@@ -1141,8 +1527,9 @@ class GNResponse(Exception):
     """
     def __init__(self,
                  command: str | int | bool | bytes,
-                 payload: SerializableType | 'TempDataObject' | None = None,
-                 cookies: dict | None = None
+                 payload: SerializableType | 'TempDataObject' | AsyncIterable[bytes] | None = None,
+                 cookies: dict | None = None,
+                 lenPayload: Optional[int] = None
                  ):
         """
         :param command: Команда ответа. `str`, `int`, `bool`, `bytes`.
@@ -1158,27 +1545,44 @@ class GNResponse(Exception):
 
         self._tdo: TempDataObject | None = None
 
-        if isinstance(payload, TempDataObject):
-            self._tdo = payload
+        self._payload_source: Optional[AsyncIterable[bytes]] = None
+        self._payload_source_consumed = False
+
+        if _is_async_payload_source(payload):
+            if lenPayload is None:
+                raise ValueError('lenPayload is required for async payload sources')
+            self._payload_source = cast(AsyncIterable[bytes], payload)
+            self._payload_state = _AsyncPayloadState(payload_size=lenPayload)
         else:
-            tdo = TempDataObject.STP(payload)
-            self._tdo = tdo
+            if isinstance(payload, TempDataObject):
+                self._tdo = payload
+            else:
+                tdo = TempDataObject.STP(cast(SerializableType, payload))
+                self._tdo = tdo
+
+            raw_payload = self._tdo.serialize() if self._tdo is not None else None
+            self._payload_state = _AsyncPayloadState(
+                payload_size=len(raw_payload or b''),
+                initial_payload=raw_payload,
+                complete=True
+            )
 
         self.__raw_payload_cache: SerializableType | None = None
+        self.iter = _PayloadIterProxy(self._payload_state)
 
     def assembly(self): ... # legacy
         
 
     def serialize(self) -> bytes:
+        if self._payload_source is not None and not self._payload_source_consumed:
+            raise TypeError('Async payload source requires async send path')
+
         if self._cookies is not None:
             cookies = serialize(self._cookies)
         else:
             cookies = None
 
-        if self._tdo is not None:
-            payload = self._tdo.serialize()
-        else:
-            payload = None
+        payload = self._tdo.serialize() if self._tdo is not None else self._payload_state.currentPayload
         
         return pack_gnresponse(
             version=0,
@@ -1186,6 +1590,79 @@ class GNResponse(Exception):
             payload=payload,
             cookies=cookies
         )
+
+    def serializeHeader(self) -> bytes:
+        if self._cookies is not None:
+            cookies = serialize(self._cookies)
+        else:
+            cookies = None
+
+        return pack_gnresponse_header(
+            version=0,
+            command=self._command,
+            payload_length=self.lenPayload,
+            cookies=cookies
+        )
+
+    async def _materialize_payload_source(self) -> Optional[bytes]:
+        if self._payload_source is None or self._payload_source_consumed:
+            return await self._payload_state.get_raw_payload()
+
+        total = 0
+        try:
+            async for chunk in self._payload_source:
+                if not isinstance(chunk, (bytes, bytearray, memoryview)):
+                    raise TypeError('Async payload source must yield bytes')
+                blob = bytes(chunk)
+                total += len(blob)
+                self._payload_state.feed(blob)
+
+            self._payload_source_consumed = True
+            if total != self._payload_state.payloadSize:
+                raise ValueError('Async payload source length does not match lenPayload')
+            self._payload_state.finish(True)
+        except Exception as exc:
+            self._payload_source_consumed = True
+            self._payload_state.fail(exc)
+            raise
+
+        raw = self._payload_state.currentPayload
+        self.setSerializedPayload(raw)
+        return raw
+
+    async def iterSerializedPayload(self) -> AsyncGenerator[bytes, None]:
+        if self._payload_source is None:
+            raw = self._tdo.serialize() if self._tdo is not None else self._payload_state.currentPayload
+            if raw:
+                yield raw
+            return
+
+        if self._payload_source_consumed:
+            raw = self._payload_state.currentPayload
+            if raw:
+                yield raw
+            return
+
+        total = 0
+        try:
+            async for chunk in self._payload_source:
+                if not isinstance(chunk, (bytes, bytearray, memoryview)):
+                    raise TypeError('Async payload source must yield bytes')
+                blob = bytes(chunk)
+                total += len(blob)
+                self._payload_state.feed(blob)
+                yield blob
+
+            self._payload_source_consumed = True
+            if total != self._payload_state.payloadSize:
+                raise ValueError('Async payload source length does not match lenPayload')
+            self._payload_state.finish(True)
+        except Exception as exc:
+            self._payload_source_consumed = True
+            self._payload_state.fail(exc)
+            raise
+
+        self.setSerializedPayload(self._payload_state.currentPayload)
     
     @staticmethod
     def deserialize(data: bytes) -> 'GNResponse':
@@ -1204,7 +1681,7 @@ class GNResponse(Exception):
         )
 
     @staticmethod
-    def try_deserialize_header(data: bytes) -> Optional[Tuple['GNResponse', int, Optional[int]]]:
+    def try_deserialize_header(data: bytes) -> Optional[Tuple['GNResponse', int, int]]:
         try:
             d, payload_offset, payload_length = unpack_gnresponse_header(bytes(data))
         except IncompleteGNFrameError:
@@ -1214,39 +1691,87 @@ class GNResponse(Exception):
 
         response = GNResponse(
             command=d['command'],
-            payload=None,
+            payload=TempDataObject(container=None),
             cookies=cookies
         )
-        response.tdo = None
+        response._tdo = None
+        response.__raw_payload_cache = None
+        response._payload_state = _AsyncPayloadState(payload_size=int(payload_length or 0))
+        response.iter = _PayloadIterProxy(response._payload_state)
 
-        return response, payload_offset, payload_length
+        return response, payload_offset, int(payload_length or 0)
 
     def setSerializedPayload(self, payload: bytes | bytearray | memoryview | None):
         if payload is None:
-            self.tdo = None
+            self._tdo = None
+            self.__raw_payload_cache = None
             return
-        self.tdo = TempDataObject.deserialize(bytes(payload), unpack_container=False)
+        blob = bytes(payload)
+        self._tdo = TempDataObject.deserialize(blob, unpack_container=False)
+        self.__raw_payload_cache = None
+
+    def _feedIncomingPayload(self, payload: bytes | bytearray | memoryview) -> None:
+        self._payload_state.feed(payload)
+
+    def _finishIncomingPayload(self, end_stream: bool) -> None:
+        self._payload_state.finish(end_stream)
+        if self._payload_state.payloadComplete:
+            self.setSerializedPayload(self._payload_state.currentPayload)
     
     @property
-    def tdo(self) -> TempDataObject | None:
-        if self._tdo is None:
-            return None
-        
+    def tdo(self):
+        return self._get_tdo()
+
+    async def _get_tdo(self) -> TempDataObject | None:
+        if self._payload_source is not None and not self._payload_source_consumed:
+            raw = await self._materialize_payload_source()
+            if raw is None:
+                return None
+
+        elif self._tdo is None:
+            raw = await self._payload_state.get_raw_payload()
+            if raw is None:
+                return None
+            self.setSerializedPayload(raw)
+
         return self._tdo
 
     @tdo.setter
     def tdo(self, value: TempDataObject | None):
         self._tdo = value
         self.__raw_payload_cache = None
+        raw_payload = value.serialize() if value is not None else None
+        self._payload_source = None
+        self._payload_source_consumed = False
+        self._payload_state = _AsyncPayloadState(
+            payload_size=len(raw_payload or b''),
+            initial_payload=raw_payload,
+            complete=True
+        )
+        self.iter = _PayloadIterProxy(self._payload_state)
     
     @property
-    def payload(self) -> SerializableType | bytes | None:
+    def payload(self):
         """
         # Полезная нагрузка ответа
         Если полезная нагрузка в контейнере `TempDataObject` не распакована, контейнер будет распакован.
         """
+        return self._get_payload()
+
+    async def _get_payload(self) -> SerializableType | bytes | None:
         if self.__raw_payload_cache is not None:
             return self.__raw_payload_cache
+
+        if self._payload_source is not None and not self._payload_source_consumed:
+            raw = await self._materialize_payload_source()
+            if raw is None:
+                return None
+
+        elif self._tdo is None:
+            raw = await self._payload_state.get_raw_payload()
+            if raw is None:
+                return None
+            self.setSerializedPayload(raw)
 
         if self._tdo is None or self._tdo.container is None:
             return None
@@ -1266,12 +1791,20 @@ class GNResponse(Exception):
     @cookies.setter
     def cookies(self, value: dict | None):
         self._cookies = value
+
+    @property
+    def payloadSize(self) -> int:
+        return self._payload_state.payloadSize
+
+    @property
+    def lenPayload(self) -> int:
+        return self._payload_state.payloadSize
     
     def __repr__(self):
         return f"<GNResponse [{self._command}]>"
     
     def __str__(self) -> str:
-        return f"[GNResponse]: {self._command} {self._tdo}"
+        return f"[GNResponse]: {self._command}"
 
 
 from .fastcommands import AllGNFastCommands, COMMAND_TREE, COMMAND_PREFIX
