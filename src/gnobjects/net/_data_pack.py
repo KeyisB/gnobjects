@@ -82,6 +82,10 @@ _rev_inTypes:   Dict[int, str] = {v: k for k, v in common_inTypes.items()}
 _rev_methods:   Dict[int, str] = {v: k for k, v in common_gnrequest_methods.items()}
 
 
+class IncompleteGNFrameError(ValueError):
+    pass
+
+
 # ===== gnrequest =====
 def pack_gnrequest(
                  version: int,
@@ -114,6 +118,18 @@ def unpack_gnrequest(data: bytes) -> dict:
 
     if version == 0:
         return unpack_gnrequest_v0(data)
+    else:
+        raise ValueError('Unsupported version')
+
+
+def unpack_gnrequest_header(data: bytes) -> Tuple[dict, int]:
+    if len(data) == 0:
+        raise IncompleteGNFrameError("Empty data")
+
+    version = (data[0] >> 6) & 0b11
+
+    if version == 0:
+        return unpack_gnrequest_header_v0(data)
     else:
         raise ValueError('Unsupported version')
 
@@ -462,6 +478,152 @@ def unpack_gnrequest_v0(data: bytes) -> dict:
         'cookies': cookies,
         'payload': payload,
     }
+
+
+def unpack_gnrequest_header_v0(data: bytes) -> Tuple[dict, int]:
+    total_len = len(data)
+    pos = 0
+
+    def ensure(n: int):
+        if pos + n > total_len:
+            raise IncompleteGNFrameError(
+                f"Truncated input: need {n} bytes at pos {pos}, total {total_len}"
+            )
+
+    def lookup_by_value(d: dict, code: int, what: str) -> str:
+        for k, v in d.items():
+            if v == code:
+                return k
+        raise ValueError(f"Unknown {what} code {code}")
+
+    ensure(1)
+    types_b = data[pos]
+    pos += 1
+
+    version = (types_b >> 6) & 0b11
+    t_quik_real = ((types_b >> 5) & 1) == 1
+    t_common = ((types_b >> 4) & 1) == 1
+    m_get = ((types_b >> 3) & 1) == 1
+    m_common = ((types_b >> 2) & 1) == 1
+    r_gn_net = ((types_b >> 1) & 1) == 1
+    r_common = ((types_b >> 0) & 1) == 1
+
+    b1_present = (not t_quik_real and t_common) or m_common
+    b2_present = (not r_gn_net and r_common)
+
+    b1 = 0
+    if b1_present:
+        ensure(1)
+        b1 = data[pos]
+        pos += 1
+
+    b2 = 0
+    if b2_present:
+        ensure(1)
+        b2 = data[pos]
+        pos += 1
+
+    t_is_str = (not t_quik_real) and (not t_common)
+    m_is_str = (not m_get) and (not m_common)
+    r_is_str = (not r_gn_net) and (not r_common)
+
+    t_len = 0
+    if t_is_str:
+        ensure(1)
+        t_len = data[pos]
+        pos += 1
+
+    m_len = 0
+    if m_is_str:
+        ensure(1)
+        m_len = data[pos]
+        pos += 1
+
+    r_len = 0
+    if r_is_str:
+        ensure(1)
+        r_len = data[pos]
+        pos += 1
+
+    if t_quik_real:
+        transport = base_gnrequest_transport
+    elif t_common:
+        t_code = ((b1 >> 4) & 0x0F) - 1
+        if t_code < 0:
+            raise ValueError("Invalid transport code (zero)")
+        transport = lookup_by_value(common_gnrequest_transports, t_code, "transport")
+    else:
+        ensure(t_len)
+        transport = data[pos:pos + t_len].decode('utf-8')
+        pos += t_len
+
+    if m_get:
+        method = base_gnrequest_method
+    elif m_common:
+        m_code = (b1 & 0x0F) - 1
+        if m_code < 0:
+            raise ValueError("Invalid method code (zero)")
+        method = lookup_by_value(common_gnrequest_methods, m_code, "method")
+    else:
+        ensure(m_len)
+        method = data[pos:pos + m_len].decode('utf-8')
+        pos += m_len
+
+    if r_gn_net:
+        route = base_gnrequest_route
+    elif r_common:
+        r_code = b2 - 1
+        if r_code < 0:
+            raise ValueError("Invalid route code (zero)")
+        route = lookup_by_value(common_gnrequest_routes, r_code, "route")
+    else:
+        ensure(r_len)
+        route = data[pos:pos + r_len].decode('utf-8')
+        pos += r_len
+
+    ensure(1)
+    b3 = data[pos]
+    pos += 1
+
+    payload_present = ((b3 >> 7) & 1) == 1
+    cookies_present = ((b3 >> 6) & 1) == 1
+    url_len_flag = (b3 >> 4) & 0b11
+    cookies_len_flag = (b3 >> 2) & 0b11
+
+    try:
+        url_len_size = _len_encode_2_bit[url_len_flag]
+    except IndexError:
+        raise ValueError(f"Invalid url_len_flag {url_len_flag}")
+
+    cookies_len_size = _len_encode_2_bit[cookies_len_flag] if cookies_present else 0
+
+    ensure(url_len_size)
+    url_len = int.from_bytes(data[pos:pos + url_len_size], 'big', signed=False)
+    pos += url_len_size
+
+    ensure(url_len)
+    url = data[pos:pos + url_len]
+    pos += url_len
+
+    cookies = None
+    if cookies_present:
+        ensure(cookies_len_size)
+        c_len = int.from_bytes(data[pos:pos + cookies_len_size], 'big', signed=False)
+        pos += cookies_len_size
+
+        ensure(c_len)
+        cookies = data[pos:pos + c_len]
+        pos += c_len
+
+    return {
+        'version': version,
+        'transport': transport,
+        'method': method,
+        'route': route,
+        'url': url,
+        'cookies': cookies,
+        'payload_present': payload_present,
+    }, pos
 
 # ===== gnrequest =====
 
@@ -1008,7 +1170,7 @@ def pack_temp_data_group_v0(version: int, path: str, payload: List[bytes]) -> by
 
     # items
     for p in payload:
-        blob.extend(__encode_varlen_2358(len(p)))
+        blob.extend(encode_varlen_2358(len(p)))
         blob.extend(p)
 
     return bytes(blob)
@@ -1082,6 +1244,18 @@ def unpack_gnresponse(data: bytes) -> dict:
 
     if version == 0:
         return unpack_gnresponse_v0(data)
+    else:
+        raise ValueError('Unsupported version')
+
+
+def unpack_gnresponse_header(data: bytes) -> Tuple[dict, int, Optional[int]]:
+    if len(data) == 0:
+        raise IncompleteGNFrameError("Empty data")
+
+    version = (data[0] >> 6) & 0b11
+
+    if version == 0:
+        return unpack_gnresponse_header_v0(data)
     else:
         raise ValueError('Unsupported version')
 
@@ -1323,6 +1497,90 @@ def unpack_gnresponse_v0(buf: bytes) -> dict:
     if pos != len(buf):
         raise ValueError("Trailing bytes")
     return res
+
+
+def unpack_gnresponse_header_v0(buf: bytes) -> Tuple[dict, int, Optional[int]]:
+    total_len = len(buf)
+    pos = 0
+
+    def ensure(n: int):
+        if pos + n > total_len:
+            raise IncompleteGNFrameError(
+                f"Truncated input: need {n} bytes at pos {pos}, total {total_len}"
+            )
+
+    def decode_varint(offset: int) -> Tuple[int, int]:
+        if offset >= total_len:
+            raise IncompleteGNFrameError("Buffer underflow (no varint head)")
+        tag = buf[offset] >> 6
+        size = (2, 3, 5, 8)[tag]
+        end = offset + size
+        if end > total_len:
+            raise IncompleteGNFrameError("Buffer underflow (varint truncated)")
+        raw = int.from_bytes(buf[offset:end], "big")
+        payload_bits = size * 8 - 2
+        value = raw & ((1 << payload_bits) - 1)
+        return value, end
+
+    ensure(1)
+    b0 = buf[pos]
+    pos += 1
+
+    version = (b0 >> 6) & 0b11
+    ctype = (b0 >> 4) & 0b11
+    has_cookies = bool((b0 >> 3) & 1)
+    has_payload = bool((b0 >> 2) & 1)
+    nibble = b0 & 0x0F
+
+    res = {"version": version, "command_type": ctype, "cookies": None, "payload": None}
+
+    inline_command = (not has_cookies) and (not has_payload) and nibble != 0x0F
+
+    if ctype == 0b00:
+        res["command"] = bool((b0 >> 1) & 1)
+
+    elif ctype == 0b01:
+        if inline_command:
+            res["command"] = nibble
+        else:
+            val, pos = decode_varint(pos)
+            res["command"] = val
+
+    elif ctype == 0b10:
+        if inline_command:
+            ln = nibble
+        else:
+            ln, pos = decode_varint(pos)
+        ensure(ln)
+        end = pos + ln
+        res["command"] = buf[pos:end].decode("utf-8")
+        pos = end
+
+    elif ctype == 0b11:
+        if inline_command:
+            ln = nibble
+        else:
+            ln, pos = decode_varint(pos)
+        ensure(ln)
+        end = pos + ln
+        res["command"] = bytes(buf[pos:end])
+        pos = end
+    else:
+        raise ValueError("Unknown command type")
+
+    if has_cookies:
+        ln, pos = decode_varint(pos)
+        end = pos + ln
+        if end > total_len:
+            raise IncompleteGNFrameError("Cookies truncated")
+        res["cookies"] = bytes(buf[pos:end])
+        pos = end
+
+    payload_length: Optional[int] = None
+    if has_payload:
+        payload_length, pos = decode_varint(pos)
+
+    return res, pos, payload_length
 # ===== GNResponse =====
 
 

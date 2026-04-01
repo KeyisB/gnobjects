@@ -12,8 +12,11 @@ from .values import tablex_file_extension_to_inType
 from ._data_pack import (
     pack_gnrequest,
     unpack_gnrequest,
+    unpack_gnrequest_header,
     pack_gnresponse,
     unpack_gnresponse,
+    unpack_gnresponse_header,
+    IncompleteGNFrameError,
     _Aracada_container_packer
     )
 
@@ -946,6 +949,33 @@ class GNRequest:
         else:
             raise Exception(f'Unsupported GNRequest version: {version}')
 
+    @staticmethod
+    def try_deserialize_header(data: bytes) -> Optional[Tuple['GNRequest', int, bool]]:
+        try:
+            d, payload_offset = unpack_gnrequest_header(bytes(data))
+        except IncompleteGNFrameError:
+            return None
+
+        cookies = cast(dict, deserialize(d['cookies']) if d['cookies'] is not None else None)
+
+        request = GNRequest(
+            transport=d['transport'],
+            route=d['route'],
+            method=d['method'],
+            url=Url(d['url'].decode()),
+            payload=None,
+            cookies=cookies
+        )
+        request.tdo = None
+
+        return request, payload_offset, bool(d.get('payload_present'))
+
+    def setSerializedPayload(self, payload: bytes | bytearray | memoryview | None):
+        if payload is None:
+            self.tdo = None
+            return
+        self.tdo = TempDataObject.deserialize(bytes(payload), unpack_container=False)
+
     def _assembly_server(self):
         d: str = self.client._data['domain']
 
@@ -1144,11 +1174,16 @@ class GNResponse(Exception):
             cookies = serialize(self._cookies)
         else:
             cookies = None
+
+        if self._tdo is not None:
+            payload = self._tdo.serialize()
+        else:
+            payload = None
         
         return pack_gnresponse(
             version=0,
             command=self._command,
-            payload=cast(TempDataObject, self._tdo).serialize(),
+            payload=payload,
             cookies=cookies
         )
     
@@ -1167,6 +1202,30 @@ class GNResponse(Exception):
             payload=payload,
             cookies=cookies
         )
+
+    @staticmethod
+    def try_deserialize_header(data: bytes) -> Optional[Tuple['GNResponse', int, Optional[int]]]:
+        try:
+            d, payload_offset, payload_length = unpack_gnresponse_header(bytes(data))
+        except IncompleteGNFrameError:
+            return None
+
+        cookies = cast(dict, deserialize(d['cookies'])) if d['cookies'] is not None else None
+
+        response = GNResponse(
+            command=d['command'],
+            payload=None,
+            cookies=cookies
+        )
+        response.tdo = None
+
+        return response, payload_offset, payload_length
+
+    def setSerializedPayload(self, payload: bytes | bytearray | memoryview | None):
+        if payload is None:
+            self.tdo = None
+            return
+        self.tdo = TempDataObject.deserialize(bytes(payload), unpack_container=False)
     
     @property
     def tdo(self) -> TempDataObject | None:
