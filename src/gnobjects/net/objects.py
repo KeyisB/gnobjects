@@ -1024,7 +1024,7 @@ class GNRequest:
         transport: str | None = None,
         route: str | None = None,
         origin: str | None = None,
-        lenPayload: Optional[int] = None
+        payloadSize: Optional[int] = None
     ):
         """
         # Создание запроса
@@ -1042,7 +1042,7 @@ class GNRequest:
         :param transport: Транспортный протокол запроса.
         :param route: Route bucket запроса.
         :param origin: Origin страницы или источника запроса.
-        :param lenPayload:
+        :param payloadSize:
             Полная длина wire-payload в байтах. Обязательна, если `payload` передан как
             `AsyncIterable[bytes]`, потому что header запроса теперь содержит длину payload.
 
@@ -1065,10 +1065,10 @@ class GNRequest:
         self._payload_source_consumed = False
 
         if _is_async_payload_source(payload):
-            if lenPayload is None:
-                raise ValueError('lenPayload is required for async payload sources')
+            if payloadSize is None:
+                raise ValueError('payloadSize is required for async payload sources')
             self._payload_source = cast(AsyncIterable[bytes], payload)
-            self._payload_state = _AsyncPayloadState(payload_size=lenPayload)
+            self._payload_state = _AsyncPayloadState(payload_size=payloadSize)
         else:
             if isinstance(payload, TempDataObject):
                 self._tdo = payload
@@ -1446,7 +1446,7 @@ class GNRequest:
             self._route,
             self._method,
             self.url.toString().encode(),
-            self.lenPayload,
+            self.payloadSize,
             raw_cookies
         )
 
@@ -1461,7 +1461,7 @@ class GNRequest:
         (`await request.payload`, `await request.tdo`), хотя сам request был создан с
         потоковым исходящим payload.
 
-        Если длина фактически полученных байтов не совпадает с `lenPayload`, будет брошено
+        Если длина фактически полученных байтов не совпадает с `payloadSize`, будет брошено
         исключение.
         """
         if self._payload_source is None or self._payload_source_consumed:
@@ -1478,7 +1478,7 @@ class GNRequest:
 
             self._payload_source_consumed = True
             if total != self._payload_state.payloadSize:
-                raise ValueError('Async payload source length does not match lenPayload')
+                raise ValueError('Async payload source length does not match payloadSize')
             self._payload_state.finish(True)
         except Exception as exc:
             self._payload_source_consumed = True
@@ -1531,7 +1531,7 @@ class GNRequest:
 
             self._payload_source_consumed = True
             if total != self._payload_state.payloadSize:
-                raise ValueError('Async payload source length does not match lenPayload')
+                raise ValueError('Async payload source length does not match payloadSize')
             self._payload_state.finish(True)
         except Exception as exc:
             self._payload_source_consumed = True
@@ -1811,7 +1811,7 @@ class GNRequest:
 
         Это означает, что после установки:
 
-        - `payloadSize` и `lenPayload` будут пересчитаны
+        - `payloadSize` и `payloadSize` будут пересчитаны
         - `request.iter` будет привязан к новому payload
         - кэш значения `await request.payload` будет сброшен
         """
@@ -1839,17 +1839,6 @@ class GNRequest:
         """
         return self._payload_state.payloadSize
 
-    @property
-    def lenPayload(self) -> int:
-        """
-        # Алиас для `payloadSize`
-
-        Возвращает полную длину wire-payload в байтах.
-
-        Свойство введено как явный API для transport-слоя и header-first отправки.
-        Именно это значение кодируется в header `GNRequest`.
-        """
-        return self._payload_state.payloadSize
 
     @property
     def cookies(self) -> dict | None:
@@ -1938,7 +1927,7 @@ class GNResponse(Exception):
                  command: str | int | bool | bytes,
                  payload: SerializableType | 'TempDataObject' | AsyncIterable[bytes] | None = None,
                  cookies: dict | None = None,
-                 lenPayload: Optional[int] = None
+                 payloadSize: Optional[int] = None
                  ):
         """
         # Создание ответа
@@ -1952,7 +1941,7 @@ class GNResponse(Exception):
             - `None` для ответа без payload
 
         :param cookies: Метаданные ответа.
-        :param lenPayload:
+        :param payloadSize:
             Обязательная полная длина wire-payload, если `payload` передан как
             `AsyncIterable[bytes]`.
 
@@ -1973,10 +1962,10 @@ class GNResponse(Exception):
         self._payload_source_consumed = False
 
         if _is_async_payload_source(payload):
-            if lenPayload is None:
-                raise ValueError('lenPayload is required for async payload sources')
+            if payloadSize is None:
+                raise ValueError('payloadSize is required for async payload sources')
             self._payload_source = cast(AsyncIterable[bytes], payload)
-            self._payload_state = _AsyncPayloadState(payload_size=lenPayload)
+            self._payload_state = _AsyncPayloadState(payload_size=payloadSize)
         else:
             if isinstance(payload, TempDataObject):
                 self._tdo = payload
@@ -2049,7 +2038,7 @@ class GNResponse(Exception):
         return pack_gnresponse_header(
             version=0,
             command=self._command,
-            payload_length=self.lenPayload,
+            payload_length=self.payloadSize,
             cookies=cookies
         )
 
@@ -2074,7 +2063,7 @@ class GNResponse(Exception):
 
             self._payload_source_consumed = True
             if total != self._payload_state.payloadSize:
-                raise ValueError('Async payload source length does not match lenPayload')
+                raise ValueError('Async payload source length does not match payloadSize')
             self._payload_state.finish(True)
         except Exception as exc:
             self._payload_source_consumed = True
@@ -2119,7 +2108,7 @@ class GNResponse(Exception):
 
             self._payload_source_consumed = True
             if total != self._payload_state.payloadSize:
-                raise ValueError('Async payload source length does not match lenPayload')
+                raise ValueError('Async payload source length does not match payloadSize')
             self._payload_state.finish(True)
         except Exception as exc:
             self._payload_source_consumed = True
