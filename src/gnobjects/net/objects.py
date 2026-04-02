@@ -2,6 +2,7 @@ import re
 import os
 import ast
 import asyncio
+import zstandard as zstd
 from typing import Optional, Dict, Any, List, Union, Literal, Tuple, cast, overload, AsyncIterable, AsyncGenerator
 import anyio
 from pathlib import Path
@@ -755,6 +756,7 @@ class _AsyncPayloadState:
             raise ValueError('chunk_size must be > 0')
 
         offset = 0
+        compression_info = (0, 0, 0, 0)
         if require_container_header or payload_only:
             header = await self.get_container_header()
             if header is None:
@@ -762,6 +764,52 @@ class _AsyncPayloadState:
                 return
             if payload_only:
                 offset = cast(int, self._container_header_len)
+                compression_info = cast(Tuple[int, int, int, int], getattr(header, 'compression_info', (0, 0, 0, 0)) or (0, 0, 0, 0))
+
+        if payload_only and compression_info[0]:
+            on, use_map, alg, level = compression_info
+            if use_map:
+                raise NotImplementedError('Pretrained map decompression not implemented')
+            if alg != 0:
+                raise NotImplementedError(f'Unknown compression algorithm code: {alg}')
+
+            decompressor = zstd.ZstdDecompressor().decompressobj(write_size=chunk_size)
+            compressed_offset = offset
+            decompressed = bytearray()
+
+            while True:
+                self._raise_failure()
+                available = len(self._payload)
+
+                if available > compressed_offset:
+                    try:
+                        decompressed.extend(decompressor.decompress(bytes(self._payload[compressed_offset:available])))
+                    except zstd.ZstdError as exc:
+                        raise ValueError(f'Decompression failed: {exc}') from exc
+                    compressed_offset = available
+
+                while len(decompressed) >= chunk_size:
+                    yield bytes(decompressed[:chunk_size])
+                    del decompressed[:chunk_size]
+
+                if self._payload_complete:
+                    if not decompressor.eof:
+                        if decompressed:
+                            yield bytes(decompressed)
+                        yield None
+                        return
+
+                    if decompressed:
+                        yield bytes(decompressed)
+                    return
+
+                if self._payload_incomplete:
+                    if decompressed:
+                        yield bytes(decompressed)
+                    yield None
+                    return
+
+                await self._wait_for_progress()
 
         while True:
             self._raise_failure()
@@ -788,6 +836,33 @@ class _AsyncPayloadState:
 
 
 class _PayloadIterProxy:
+    """
+    # Прокси для потокового чтения payload
+
+    Экземпляр этого класса доступен как `request.iter` и `response.iter`.
+
+    Прокси не хранит собственных данных. Он только предоставляет удобный API
+    поверх внутреннего состояния загрузки payload.
+
+    Основная идея следующая:
+
+    - `await obj.iter.header` ждёт только header контейнера `TempDataObject`
+    - `obj.iter.raw(chunk_size)` отдаёт весь wire-payload целиком, включая header контейнера
+    - `obj.iter.tdo(chunk_size)` тоже отдаёт wire-payload контейнера, но начинает работу
+        только после того, как header контейнера уже полностью собран
+    - `obj.iter.payload(chunk_size)` отдаёт только внутренний payload контейнера,
+        без header контейнера, а если в header указана компрессия, то потоково
+        декомпрессирует bytes перед выдачей
+    - `obj.iter.currentPayload` возвращает уже накопленную на данный момент часть
+        wire-payload без ожидания
+
+    Во всех итераторах `chunk_size` задаёт желаемый размер выдачи. Данные режутся
+    не так, как пришли по сети, а именно по указанному размеру чанка, за исключением
+    последнего чанка.
+
+    Если stream завершился до получения полного payload, итератор завершится чанком
+    `None`, а `await payload` / `await tdo` вернёт `None`.
+    """
     __slots__ = ['_state']
 
     def __init__(self, state: _AsyncPayloadState) -> None:
@@ -795,19 +870,114 @@ class _PayloadIterProxy:
 
     @property
     def header(self):
+        """
+        # Header контейнера `TempDataObject`
+
+        Awaitable-свойство, которое дожидается только header контейнера во входящем
+        payload, не ожидая полной загрузки всего контейнера.
+
+        Возвращаемое значение:
+
+        - `ITPContainer` с пустым `payload`, если во входящем payload находится ITP
+        - `STPContainer` с пустым `payload`, если во входящем payload находится STP
+        - `None`, если stream завершился раньше, чем удалось получить полный header
+          контейнера или если payload отсутствует
+
+        Это свойство полезно, когда нужно рано узнать метаданные payload:
+
+        - тип контейнера
+        - тип интерпретатора ITP
+        - версию контейнера
+        - параметры compression header
+
+        При этом сам payload контейнера может ещё продолжать приходить.
+
+        Пример:
+
+        ```python
+        container_header = await request.iter.header
+        ```
+        """
         return self._state.get_container_header()
 
     @property
     def currentPayload(self) -> bytes:
+        """
+        # Уже полученная часть wire-payload
+
+        Возвращает bytes без ожидания. Это именно те байты payload уровня
+        `GNRequest` / `GNResponse`, которые уже накоплены во внутреннем буфере.
+
+        Важно:
+
+        - сюда входит header контейнера `TempDataObject`, если он уже пришёл
+        - это не обязательно полный payload
+        - это не распакованный payload контейнера
+
+        Свойство удобно для мониторинга прогресса загрузки или для отладки.
+        """
         return self._state.currentPayload
 
     def raw(self, chunk_size: int) -> AsyncGenerator[Optional[bytes], None]:
+        """
+        # Итератор по полному wire-payload
+
+        Возвращает async generator, который отдаёт payload уровня `GNRequest` /
+        `GNResponse` как есть, без какой-либо дополнительной интерпретации.
+
+        Это значит, что в поток входят:
+
+        - header контейнера `TempDataObject`
+        - payload контейнера
+
+        То есть фактически это сериализованный `TempDataObject` целиком.
+
+        `chunk_size` определяет размер выдаваемых чанков. Данные будут нарезаны
+        ровно по этому размеру, кроме последнего чанка.
+
+        Если stream оборвался до полного payload, последним значением будет `None`.
+        """
         return self._state.iter_bytes(chunk_size, require_container_header=False, payload_only=False)
 
     def tdo(self, chunk_size: int) -> AsyncGenerator[Optional[bytes], None]:
+        """
+        # Итератор по сериализованному контейнеру
+
+        Возвращает async generator, который отдаёт сериализованный контейнер
+        `TempDataObject` по чанкам.
+
+        По содержимому это почти то же самое, что `raw()`, но есть важная разница:
+        выдача начинается только после того, как header контейнера уже полностью
+        разобран. Это позволяет сначала безопасно получить `await iter.header`, а затем
+        читать сериализованный контейнер потоково.
+
+        Используется, когда нужно работать именно с контейнером как с объектом wire-format,
+        а не только с его внутренним payload.
+
+        Если stream оборвался до полного payload, последним значением будет `None`.
+        """
         return self._state.iter_bytes(chunk_size, require_container_header=True, payload_only=False)
 
     def payload(self, chunk_size: int) -> AsyncGenerator[Optional[bytes], None]:
+        """
+        # Итератор по payload контейнера
+
+        Возвращает async generator, который отдаёт только внутренний payload контейнера,
+        без header контейнера `TempDataObject`.
+
+        Семантика:
+
+        - для `ITP` это байты содержимого контейнера, например содержимое файла
+        - для `STP` это тоже байты payload контейнера, но без автоматической
+          десериализации в Python-объект
+
+        То есть этот метод всегда возвращает `bytes`, а не уже распакованный объект.
+
+        Перед началом выдачи метод дожидается полного header контейнера, чтобы точно
+        знать, где начинается внутренний payload.
+
+        Если stream оборвался до полного payload, последним значением будет `None`.
+        """
         return self._state.iter_bytes(chunk_size, require_container_header=True, payload_only=True)
 
 
@@ -819,6 +989,31 @@ def _is_async_payload_source(value: Any) -> bool:
 class GNRequest:
     """
     # Запрос для сети `GN`
+
+        Объект запроса теперь поддерживает два режима работы с payload:
+
+        1. Обычный режим
+
+        Когда payload уже полностью доступен в памяти. В этом случае можно работать
+        с `await request.payload`, `await request.tdo`, `request.serialize()` и так далее
+        как с цельным объектом.
+
+        2. Потоковый режим
+
+        Когда request был создан по header, а payload ещё продолжает приходить из сети,
+        либо когда исходящий payload передан как `AsyncIterable[bytes]`.
+
+        В потоковом режиме:
+
+        - обработчик может стартовать сразу после полного header `GNRequest`
+        - `await request.payload` ждёт полный payload
+        - `await request.tdo` ждёт полный сериализованный контейнер
+        - `await request.iter.header` ждёт только header контейнера `TempDataObject`
+        - `async for chunk in request.iter.payload(...)` позволяет читать payload контейнера
+            без ожидания полной загрузки
+
+        Если stream оборвался до полного payload, `await request.payload` и
+        `await request.tdo` вернут `None`, а потоковые итераторы завершатся чанком `None`.
     """
     def __init__(
         self,
@@ -831,6 +1026,33 @@ class GNRequest:
         origin: str | None = None,
         lenPayload: Optional[int] = None
     ):
+        """
+        # Создание запроса
+
+        :param method: HTTP-подобный метод запроса (`get`, `post`, `put`, `delete`, ...).
+        :param url: URL запроса в формате `Url`.
+        :param payload:
+            Полезная нагрузка запроса. Поддерживаются три режима:
+
+            - `SerializableType` или `TempDataObject`: payload сразу считается готовым
+            - `AsyncIterable[bytes]`: payload будет отправляться потоково по чанкам
+            - `None`: запрос без payload
+
+        :param cookies: Словарь cookies/метаданных запроса.
+        :param transport: Транспортный протокол запроса.
+        :param route: Route bucket запроса.
+        :param origin: Origin страницы или источника запроса.
+        :param lenPayload:
+            Полная длина wire-payload в байтах. Обязательна, если `payload` передан как
+            `AsyncIterable[bytes]`, потому что header запроса теперь содержит длину payload.
+
+        Важно:
+
+        - Если `payload` передан как `SerializableType`, он будет автоматически упакован
+          в `TempDataObject.STP(...)`
+        - Если `payload` передан как `AsyncIterable[bytes]`, предполагается, что это уже
+          готовый wire-payload контейнера `TempDataObject`, а не Python-объект для упаковки
+        """
         self._method: str = method
         self._url = url
         self._cookies: dict = cookies
@@ -886,6 +1108,20 @@ class GNRequest:
 
         self.__raw_payload_cache: bytes | None = None
         self.iter = _PayloadIterProxy(self._payload_state)
+        """
+        # Потоковый доступ к payload
+
+        Через `request.iter` доступны потоковые методы чтения payload:
+
+        - `await request.iter.header`
+        - `request.iter.raw(chunk_size)`
+        - `request.iter.tdo(chunk_size)`
+        - `request.iter.payload(chunk_size)`
+        - `request.iter.currentPayload`
+
+        Этот API предназначен для сценариев, где обработка начинается сразу после
+        получения header `GNRequest`, а payload продолжает догружаться позже.
+        """
 
     class __object:
         def __init__(self, request: 'GNRequest') -> None:
@@ -1141,6 +1377,20 @@ class GNRequest:
             return self._data.get("domain", None)
 
     def serialize(self, version: int = 0) -> bytes:
+        """
+        # Полная сериализация запроса
+
+        Возвращает полностью сериализованный `GNRequest`, включая payload.
+
+        Этот метод подходит только тогда, когда payload уже полностью находится в памяти.
+        Если request был создан с потоковым исходящим payload (`AsyncIterable[bytes]`) и
+        этот поток ещё не был материализован, метод бросит `TypeError`.
+
+        Для потоковой отправки нужно использовать пару:
+
+        - `serializeHeader()`
+        - `iterSerializedPayload()`
+        """
         if self._payload_source is not None and not self._payload_source_consumed:
             raise TypeError('Async payload source requires async send path')
 
@@ -1167,6 +1417,19 @@ class GNRequest:
         )
 
     def serializeHeader(self, version: int = 0) -> bytes:
+        """
+        # Сериализация только header запроса
+
+        Возвращает только header `GNRequest`, без payload.
+
+        Header уже содержит длину payload, поэтому принимающая сторона может:
+
+        - создать объект `GNRequest`
+        - немедленно передать его в обработку
+        - продолжать догружать payload независимо от жизненного цикла handler
+
+        Этот метод используется transport-слоем для header-first отправки.
+        """
         if self._transport is None:
             self.setTransport()
         if self._route is None:
@@ -1188,6 +1451,19 @@ class GNRequest:
         )
 
     async def _materialize_payload_source(self) -> Optional[bytes]:
+        """
+        # Материализация исходящего потокового payload
+
+        Внутренний helper, который полностью вычитывает `AsyncIterable[bytes]` источника
+        payload в память и возвращает собранные bytes.
+
+        Используется тогда, когда к payload request обращаются как к цельному объекту
+        (`await request.payload`, `await request.tdo`), хотя сам request был создан с
+        потоковым исходящим payload.
+
+        Если длина фактически полученных байтов не совпадает с `lenPayload`, будет брошено
+        исключение.
+        """
         if self._payload_source is None or self._payload_source_consumed:
             return await self._payload_state.get_raw_payload()
 
@@ -1214,6 +1490,23 @@ class GNRequest:
         return raw
 
     async def iterSerializedPayload(self) -> AsyncGenerator[bytes, None]:
+        """
+        # Потоковая выдача сериализованного payload
+
+        Возвращает async generator, который отдаёт wire-payload запроса в виде bytes.
+
+        Это именно payload уровня `GNRequest`, то есть сериализованный контейнер
+        `TempDataObject` целиком. Header самого `GNRequest` сюда не входит.
+
+        Метод используется transport-слоем при потоковой отправке:
+
+        - сначала вызывается `serializeHeader()`
+        - затем transport читает чанки из `iterSerializedPayload()`
+
+        Если request хранит payload уже в памяти, генератор просто вернёт один готовый блок.
+        Если payload задан как `AsyncIterable[bytes]`, генератор будет отдавать чанки по мере
+        их поступления из этого источника.
+        """
         if self._payload_source is None:
             raw = self._tdo.serialize() if self._tdo is not None else self._payload_state.currentPayload
             if raw:
@@ -1249,6 +1542,14 @@ class GNRequest:
 
     @staticmethod
     def deserialize(data: bytes) -> 'GNRequest':
+        """
+        # Полная десериализация запроса
+
+        Декодирует полностью собранный `GNRequest` из bytes, включая payload.
+
+        Этот метод используется, когда весь запрос уже доступен целиком. Для header-first
+        сценария используйте `try_deserialize_header()`.
+        """
         data = bytes(data)
         d = unpack_gnrequest(data)
 
@@ -1281,6 +1582,24 @@ class GNRequest:
 
     @staticmethod
     def try_deserialize_header(data: bytes) -> Optional[Tuple['GNRequest', int, int]]:
+        """
+        # Попытка разобрать только header запроса
+
+        Пытается декодировать header `GNRequest` из частично собранного буфера.
+
+        :param data: Текущий накопленный буфер bytes.
+        :return:
+            - `None`, если байтов пока недостаточно даже для полного header
+            - `(request, payload_offset, payload_length)`, если header уже полностью разобран
+
+        Где:
+
+        - `request` — уже созданный объект `GNRequest` без полного payload
+        - `payload_offset` — смещение в буфере, с которого начинаются байты payload
+        - `payload_length` — ожидаемая длина payload в байтах
+
+        Это ключевая точка для раннего запуска обработчика по одному только header.
+        """
         try:
             d, payload_offset = unpack_gnrequest_header(bytes(data))
         except IncompleteGNFrameError:
@@ -1304,6 +1623,15 @@ class GNRequest:
         return request, payload_offset, int(d.get('payload_length', 0))
 
     def setSerializedPayload(self, payload: bytes | bytearray | memoryview | None):
+        """
+        # Установить готовый сериализованный payload
+
+        Принимает уже полностью собранный wire-payload контейнера `TempDataObject` и
+        связывает его с request.
+
+        Метод не предназначен для пользовательского кода маршрутов. Обычно его вызывает
+        transport-слой после того, как payload полностью дочитан.
+        """
         if payload is None:
             self._tdo = None
             self.__raw_payload_cache = None
@@ -1313,9 +1641,25 @@ class GNRequest:
         self.__raw_payload_cache = None
 
     def _feedIncomingPayload(self, payload: bytes | bytearray | memoryview) -> None:
+        """
+        # Добавить очередную часть входящего payload
+
+        Внутренний метод transport-слоя. Добавляет новый фрагмент payload в буфер
+        request без завершения загрузки.
+        """
         self._payload_state.feed(payload)
 
     def _finishIncomingPayload(self, end_stream: bool) -> None:
+        """
+        # Завершить входящий payload
+
+        Внутренний метод transport-слоя. Помечает payload как завершённый или неполный.
+
+        - `end_stream=True` означает, что stream завершился штатно
+        - `end_stream=False` означает, что payload считается неполным
+
+        После штатного завершения метод автоматически связывает собранные bytes с `tdo`.
+        """
         self._payload_state.finish(end_stream)
         if self._payload_state.payloadComplete:
             self.setSerializedPayload(self._payload_state.currentPayload)
@@ -1381,11 +1725,22 @@ class GNRequest:
         """
         # Полезная нагрузка запроса
 
-        `Dict`, `List`, `bytes`, `int`, `str` и другие типы с поддержкой байтов.
+        Awaitable-свойство.
 
-        Все поддерживаемые типа описанны в `KeyisBTools.models.serialization.SerializableType`
+        Использование:
 
-        Если полезная нагрузка в контейнере `TempDataObject` не распакована, контейнер будет распакован.
+        ```python
+        data = await request.payload
+        ```
+
+        Возвращает уже распакованный payload контейнера:
+
+        - `dict`, `list`, `str`, `int`, `bytes` и другие `SerializableType` для STP
+        - `bytes` для ITP
+        - `None`, если payload отсутствует или stream завершился неполностью
+
+        Если payload ещё не догружен, свойство дождётся его полного получения.
+        После первого успешного чтения результат кэшируется.
         """
         return self._get_payload()
 
@@ -1415,6 +1770,20 @@ class GNRequest:
     def tdo(self):
         """
         # Временный объект данных запроса `TempDataObject`
+
+        Awaitable-свойство.
+
+        Использование:
+
+        ```python
+        tdo = await request.tdo
+        ```
+
+        Свойство возвращает готовый `TempDataObject`, когда весь wire-payload контейнера
+        уже получен целиком.
+
+        Если payload ещё догружается, свойство будет ждать.
+        Если stream оборвался и полный payload собрать не удалось, вернёт `None`.
         """
         return self._get_tdo()
 
@@ -1434,6 +1803,18 @@ class GNRequest:
 
     @tdo.setter
     def tdo(self, value: TempDataObject | None):
+        """
+        # Установка готового `TempDataObject`
+
+        Setter полностью заменяет текущий payload request новым контейнером и сбрасывает
+        все промежуточные буферы/кэш потокового состояния.
+
+        Это означает, что после установки:
+
+        - `payloadSize` и `lenPayload` будут пересчитаны
+        - `request.iter` будет привязан к новому payload
+        - кэш значения `await request.payload` будет сброшен
+        """
         self._tdo = value
         self.__raw_payload_cache = None
         raw_payload = value.serialize() if value is not None else None
@@ -1448,10 +1829,26 @@ class GNRequest:
 
     @property
     def payloadSize(self) -> int:
+        """
+        # Размер wire-payload в байтах
+
+        Возвращает длину payload уровня `GNRequest` в байтах.
+
+        Это не размер уже распакованного Python-объекта, а длина сериализованного payload,
+        который идёт после header `GNRequest`.
+        """
         return self._payload_state.payloadSize
 
     @property
     def lenPayload(self) -> int:
+        """
+        # Алиас для `payloadSize`
+
+        Возвращает полную длину wire-payload в байтах.
+
+        Свойство введено как явный API для transport-слоя и header-first отправки.
+        Именно это значение кодируется в header `GNRequest`.
+        """
         return self._payload_state.payloadSize
 
     @property
@@ -1524,6 +1921,18 @@ class GNRequest:
 class GNResponse(Exception):
     """
     # Ответ на запрос для сети `GN`
+
+        По возможностям работы с payload объект ответа симметричен `GNRequest`.
+
+        `GNResponse` можно использовать как:
+
+        - полностью собранный объект с обычным `await response.payload`
+        - header-first объект, который был возвращён сразу после header, а payload ещё
+            продолжает загружаться
+        - исходящий потоковый ответ, если payload задан как `AsyncIterable[bytes]`
+
+        В результате клиент может получить `GNResponse` сразу после header и только затем,
+        при необходимости, ждать полный payload или читать его потоково через `response.iter.*`.
     """
     def __init__(self,
                  command: str | int | bool | bytes,
@@ -1532,9 +1941,24 @@ class GNResponse(Exception):
                  lenPayload: Optional[int] = None
                  ):
         """
+        # Создание ответа
+
         :param command: Команда ответа. `str`, `int`, `bool`, `bytes`.
-        :param payload: Полезная нагрузка ответа. Может быть `SerializableType` или `TempDataObject`. Все поддерживаемые типа описанны в `KeyisBTools.models.serialization.SerializableType`. `SerializableType` будет преобразован в `TempDataObject` при сборке.
-        :param cookies: `dict`. Метаданные ответа.
+        :param payload:
+            Полезная нагрузка ответа. Поддерживаются те же режимы, что и у `GNRequest`:
+
+            - `SerializableType` или `TempDataObject` для полностью готового payload
+            - `AsyncIterable[bytes]` для потоковой исходящей отправки
+            - `None` для ответа без payload
+
+        :param cookies: Метаданные ответа.
+        :param lenPayload:
+            Обязательная полная длина wire-payload, если `payload` передан как
+            `AsyncIterable[bytes]`.
+
+        Важно: если `payload` передаётся как поток bytes, предполагается, что это уже
+        сериализованный payload контейнера `TempDataObject`, а не Python-объект, который
+        нужно дополнительно упаковать.
         """
         self._command = command
         self._cookies = cookies
@@ -1569,11 +1993,24 @@ class GNResponse(Exception):
 
         self.__raw_payload_cache: SerializableType | None = None
         self.iter = _PayloadIterProxy(self._payload_state)
+        """
+        # Потоковый доступ к payload ответа
+
+        Полностью симметричен `request.iter`.
+        """
 
     def assembly(self): ... # legacy
         
 
     def serialize(self) -> bytes:
+        """
+        # Полная сериализация ответа
+
+        Возвращает полностью сериализованный `GNResponse`, включая payload.
+
+        Для потокового исходящего payload этот метод использовать нельзя до тех пор,
+        пока поток не был полностью материализован.
+        """
         if self._payload_source is not None and not self._payload_source_consumed:
             raise TypeError('Async payload source requires async send path')
 
@@ -1592,6 +2029,18 @@ class GNResponse(Exception):
         )
 
     def serializeHeader(self) -> bytes:
+        """
+        # Сериализация только header ответа
+
+        Возвращает header `GNResponse`, в котором уже закодированы:
+
+        - command
+        - cookies
+        - длина payload
+
+        Это позволяет клиенту получить объект ответа сразу после header и не ждать,
+        пока весь payload будет доставлен.
+        """
         if self._cookies is not None:
             cookies = serialize(self._cookies)
         else:
@@ -1605,6 +2054,12 @@ class GNResponse(Exception):
         )
 
     async def _materialize_payload_source(self) -> Optional[bytes]:
+        """
+        # Материализация потокового исходящего payload ответа
+
+        Полностью вычитывает исходящий `AsyncIterable[bytes]` payload в память и
+        возвращает собранный wire-payload.
+        """
         if self._payload_source is None or self._payload_source_consumed:
             return await self._payload_state.get_raw_payload()
 
@@ -1631,6 +2086,15 @@ class GNResponse(Exception):
         return raw
 
     async def iterSerializedPayload(self) -> AsyncGenerator[bytes, None]:
+        """
+        # Потоковая выдача сериализованного payload ответа
+
+        Возвращает async generator, который отдаёт payload уровня `GNResponse`
+        как bytes для transport-слоя.
+
+        Header `GNResponse` сюда не входит. Только payload, который должен быть отправлен
+        после header.
+        """
         if self._payload_source is None:
             raw = self._tdo.serialize() if self._tdo is not None else self._payload_state.currentPayload
             if raw:
@@ -1666,6 +2130,13 @@ class GNResponse(Exception):
     
     @staticmethod
     def deserialize(data: bytes) -> 'GNResponse':
+        """
+        # Полная десериализация ответа
+
+        Декодирует полностью собранный `GNResponse`, включая payload.
+
+        Для header-first сценария используйте `try_deserialize_header()`.
+        """
         data = bytes(data)
         u = unpack_gnresponse(data)
         
@@ -1682,6 +2153,19 @@ class GNResponse(Exception):
 
     @staticmethod
     def try_deserialize_header(data: bytes) -> Optional[Tuple['GNResponse', int, int]]:
+        """
+        # Попытка разобрать только header ответа
+
+        Пытается декодировать header `GNResponse` из частично собранного буфера.
+
+        Возвращает:
+
+        - `None`, если header ещё не полный
+        - `(response, payload_offset, payload_length)`, если header уже собран
+
+        Это позволяет вернуть объект ответа вызывающему коду сразу после header и
+        продолжать догружать payload асинхронно.
+        """
         try:
             d, payload_offset, payload_length = unpack_gnresponse_header(bytes(data))
         except IncompleteGNFrameError:
@@ -1702,6 +2186,12 @@ class GNResponse(Exception):
         return response, payload_offset, int(payload_length or 0)
 
     def setSerializedPayload(self, payload: bytes | bytearray | memoryview | None):
+        """
+        # Установить готовый сериализованный payload ответа
+
+        Принимает уже полностью собранный wire-payload контейнера и связывает его
+        с текущим объектом `GNResponse`.
+        """
         if payload is None:
             self._tdo = None
             self.__raw_payload_cache = None
@@ -1711,15 +2201,37 @@ class GNResponse(Exception):
         self.__raw_payload_cache = None
 
     def _feedIncomingPayload(self, payload: bytes | bytearray | memoryview) -> None:
+        """
+        # Добавить очередной chunk входящего payload ответа
+
+        Внутренний helper transport-слоя.
+        """
         self._payload_state.feed(payload)
 
     def _finishIncomingPayload(self, end_stream: bool) -> None:
+        """
+        # Завершить входящий payload ответа
+
+        Помечает payload ответа как полный или неполный.
+
+        Если payload завершился штатно и полностью, объект ответа автоматически
+        получает готовый `TempDataObject`.
+        """
         self._payload_state.finish(end_stream)
         if self._payload_state.payloadComplete:
             self.setSerializedPayload(self._payload_state.currentPayload)
     
     @property
     def tdo(self):
+        """
+        # `TempDataObject` ответа
+
+        Awaitable-свойство.
+
+        Возвращает готовый `TempDataObject` после полной сборки payload ответа.
+        Если payload ещё догружается, свойство будет ждать. Если payload завершился
+        неполно, вернёт `None`.
+        """
         return self._get_tdo()
 
     async def _get_tdo(self) -> TempDataObject | None:
@@ -1738,6 +2250,12 @@ class GNResponse(Exception):
 
     @tdo.setter
     def tdo(self, value: TempDataObject | None):
+        """
+        # Установка готового `TempDataObject` ответа
+
+        Полностью заменяет текущий payload ответа новым контейнером и пересобирает
+        внутреннее потоковое состояние вокруг этого контейнера.
+        """
         self._tdo = value
         self.__raw_payload_cache = None
         raw_payload = value.serialize() if value is not None else None
@@ -1754,7 +2272,23 @@ class GNResponse(Exception):
     def payload(self):
         """
         # Полезная нагрузка ответа
-        Если полезная нагрузка в контейнере `TempDataObject` не распакована, контейнер будет распакован.
+
+        Awaitable-свойство.
+
+        Использование:
+
+        ```python
+        data = await response.payload
+        ```
+
+        Возвращает уже распакованный payload контейнера ответа:
+
+        - Python-объект для STP
+        - `bytes` для ITP
+        - `None`, если payload отсутствует или был получен неполностью
+
+        При первом обращении свойство дожидается полной загрузки payload, если это
+        необходимо, затем кэширует результат.
         """
         return self._get_payload()
 
@@ -1794,10 +2328,11 @@ class GNResponse(Exception):
 
     @property
     def payloadSize(self) -> int:
-        return self._payload_state.payloadSize
+        """
+        # Размер wire-payload ответа в байтах
 
-    @property
-    def lenPayload(self) -> int:
+        Возвращает длину payload уровня `GNResponse` в байтах, без header самого ответа.
+        """
         return self._payload_state.payloadSize
     
     def __repr__(self):
