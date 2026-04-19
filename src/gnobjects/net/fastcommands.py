@@ -649,7 +649,237 @@ class AllGNFastCommands:
             """
             cls_command = "gn:kdc:898"
 
+    class gn:
+        """
+        # GN
 
+        Ошибки сети GN, вызванные внутренними системами GN. 
+        """
+        cls_command = "gn:gn"
+
+        @register_command(("gn", 'UnknownError'))
+        class UnknownError(GNFastCommand):
+            """
+            # Неизвестная ошибка
+            Произошла неизвестная ошибка, не попадающая в другие категории.
+            """
+            cls_command = "gn:gn:unk"
+
+        @register_command(("gn", 'Types'))
+        class Types(GNFastCommand):
+            """
+            # Типовые классы ответов
+            Общие ответы, которые могут возникнуть в различных частях системы.
+            """
+            cls_command = "gn:gn:tps"
+
+            @register_command(("gn", 'Types', 'DomainNotFound'))
+            class DomainNotFound(GNFastCommand):
+                """
+                # Домен не найден
+                """
+                cls_command = "gn:gn:tps:dnf"
+            
+            
+            @register_command(("gn", 'Types', 'RegionIsIsolated'))
+            class RegionIsIsolated(GNFastCommand):
+                """
+                # Регион изолирован
+                """
+                cls_command = "gn:gn:tps:rii"
+
+
+        class availability:
+            """
+            # Доступность компонентов GN
+            """
+            cls_command = "gn:gn:avl"
+
+            @register_command(("gn", 'layer', 'UserShield'))
+            @register_command(("gn", 'availability', 'UserShield'))
+            class UserShield(GNFastCommand):
+                """
+                # Слой *~user.shield.gn недоступен
+                """
+                cls_command = "gn:gn:avl:us"
+            
+            @register_command(("gn", 'layer', 'Nexus'))
+            @register_command(("gn", 'availability', 'Nexus'))
+            class Nexus(GNFastCommand):
+                """
+                # Слой *~*.nexus.gn недоступен
+                """
+                cls_command = "gn:gn:avl:nex"
+
+                @register_command(("gn", 'layer', 'Nexus', 'NexusApi'))
+                @register_command(("gn", 'availability', 'Nexus', 'NexusApi'))
+                class NexusApi(GNFastCommand):
+                    """
+                    # Слой *~api.nexus.gn недоступен
+                    """
+                    cls_command = "gn:gn:avl:nex:api"
+        
+                    @register_command(("gn", 'availability', 'Nexus', 'NexusApi', 'TransportError'))
+                    class TransportError(GNFastCommand):
+                        """
+                        # Ошибка подключения к серверу `*~api.nexus.gn`
+                        """
+                        cls_command = "gn:gn:avl:nex:api:transport_error"
+
+                @register_command(("gn", 'layer', 'Nexus', 'NexusDomain'))
+                @register_command(("gn", 'availability', 'Nexus', 'NexusDomain'))
+                class NexusDomain(GNFastCommand):
+                    """
+                    # Слой *~domain.nexus.gn недоступен
+                    """
+                    cls_command = "gn:gn:avl:nex:domain"
+
+                    @register_command(("gn", 'availability', 'Nexus', 'NexusDomain', 'TransportError'))
+                    class TransportError(GNFastCommand):
+                        """
+                        # Ошибка подключения к серверу `*~domain.nexus.gn`
+                        """
+                        cls_command = "gn:gn:avl:nex:domain:transport_error"
+
+
+            @register_command(("gn", 'layer', 'OriginShield'))
+            @register_command(("gn", 'availability', 'OriginShield'))
+            class OriginShield(GNFastCommand):
+                """
+                # Слой *~*.origin.shield.gn недоступен
+                """
+                cls_command = "gn:gn:avl:os"
+
+                @register_command(("gn", 'availability', 'OriginShield', 'OriginShieldApi'))
+                class OriginShieldApi(GNFastCommand):
+                    """
+                    # Слой *~api.origin.shield.gn недоступен
+                    """
+                    cls_command = "gn:gn:avl:os:api"
+
+            @register_command(("gn", 'availability', 'Core'))
+            class Core(GNFastCommand):
+                """
+                # Сервис в ядре GN недоступен
+                """
+                cls_command = "gn:gn:avl:core"
+
+                @register_command(("gn", 'availability', 'Core', 'CoreApi'))
+                class DnsCore(GNFastCommand):
+                    """
+                    # Сервис `DNS Core` недоступен 
+                    """
+                    cls_command = "gn:gn:avl:core:dnscore"
+            
+
+            @register_command(("gn", 'availability', 'RGate'))
+            class RGate(GNFastCommand):
+                """
+                # Слой *~rgate.gn недоступен
+                """
+                cls_command = "gn:gn:avl:rgate"
+
+                @register_command(("gn", 'availability', 'RGate', 'TransportError'))
+                class TransportError(GNFastCommand):
+                    """
+                    # Ошибка подключения к серверу `*~rgate.gn`
+                    """
+                    cls_command = "gn:gn:avl:rgate:transport_error"
+
+        class layer:
+            """
+            # Ошибки слоёв GN
+            """
+            cls_command = "gn:gn:lyr"
+
+            @register_command(("gn", 'layer', 'Nexus'))
+            class Nexus(GNFastCommand):
+                """
+                # Ошибка на слое *~*.nexus.gn
+                """
+                cls_command = "gn:gn:lyr:nex"
+
+                @register_command(("gn", 'layer', 'Nexus', 'NexusApi'))
+                class NexusApi(GNFastCommand):
+                    """
+                    # Ошибка на слое *~api.nexus.gn
+                    """
+                    cls_command = "gn:gn:lyr:nex:api"
+
+                @register_command(("gn", 'layer', 'Nexus', 'NexusDomain'))
+                class NexusDomain(GNFastCommand):
+                    """
+                    # Ошибка на слое *~domain.nexus.gn
+                    """
+                    cls_command = "gn:gn:lyr:nex:domain"
+
+                    @register_command(("gn", 'Types', 'DomainNotFound'))
+                    @register_command(("gn", 'layer', 'Nexus', 'NexusDomain', 'DomainNotFound'))
+                    class DomainNotFound(GNFastCommand):
+                        """
+                        # Домен не найден на слое *~domain.nexus.gn
+                        """
+                        cls_command = "gn:gn:lyr:nex:domain:dnf"
+
+
+            @register_command(("gn", 'layer', 'OriginShield'))
+            class OriginShield(GNFastCommand):
+                """
+                # Ошибка на слое *~*.origin.shield.gn
+                """
+                cls_command = "gn:gn:lyr:os"
+
+                @register_command(("gn", 'layer', 'OriginShield', 'OriginShieldApi'))
+                class OriginShieldApi(GNFastCommand):
+                    """
+                    # Ошибка на слое *~api.origin.shield.gn
+                    """
+                    cls_command = "gn:gn:lyr:os:api"
+
+            @register_command(("gn", 'layer', 'Core'))
+            class Core(GNFastCommand):
+                """
+                # Ошибка в ядре GN
+                """
+                cls_command = "gn:gn:lyr:core"
+
+                @register_command(("gn", 'layer', 'Core', 'CoreApi'))
+                class DnsCore(GNFastCommand):
+                    """
+                    # Ошибка при получениии данных из сервиса `DNS Core`
+                    """
+                    cls_command = "gn:gn:lyr:os:api"
+                    
+                    @register_command(("gn", 'Types', 'DomainNotFound'))
+                    @register_command(("gn", 'layer', 'Core', 'DomainNotFound'))
+                    class DomainNotFound(GNFastCommand):
+                        """
+                        # Домен не найден в `DNS Core`
+                        """
+                        cls_command = "gn:gn:lyr:os:api"
+
+                
+            @register_command(("gn", 'layer', 'RGate'))
+            class RGate(GNFastCommand):
+                """
+                #  Ошибка при получениии данных из слоя *~rgate.gn
+                """
+                cls_command = "gn:gn:lyr:rgate"
+
+                @register_command(("gn", 'layer', 'RGate', 'Unknown'))
+                class Unknown(GNFastCommand):
+                    """
+                    # Неизвестная ошибка подключения к слою `*~rgate.gn`
+                    """
+                    cls_command = "gn:gn:lyr:rgate:unk"
+
+                @register_command(("gn", 'Types', 'RegionIsIsolated'))
+                @register_command(("gn", 'layer', 'RGate', 'RegionIsIsolated'))
+                class RegionIsIsolated(GNFastCommand):
+                    """
+                    # Регион изолирован
+                    """
+                    cls_command = "gn:gn:lyr:rgate:rii"
 
 globals().update({
     name: obj
