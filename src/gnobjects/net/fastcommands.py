@@ -573,6 +573,18 @@ class AllGNFastCommands:
             """
             cls_command = "gn:cors:706"
 
+        @register_command(("cors", 'DifferentEncryptionType'))
+        class DifferentEncryptionType(GNFastCommand):
+            """
+            # Тип шифрования входящего соединения не совпадает с настройками сервера для данного домена.
+            Отправляется сервером как pre-QUIC системный пакет (до установки QUIC-соединения).
+
+            Поля:
+              data: expected_encryption_type: int — тип шифрования, который сервер ожидает для этого домена
+                                               (0 = без шифрования, 1 = KDC+PQ+TLS, 2 = PQ+TLS)
+            """
+            cls_command = "gn:cors:707"
+
     class kdc:
         """
         # CORS

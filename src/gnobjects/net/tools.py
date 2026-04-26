@@ -90,6 +90,32 @@ class DomainMatcherList:
         return False
 
 
+class DomainMatcherDict:
+    """Maps domain patterns (with * / ** wildcards) to int values. Returns first match or None."""
+
+    __slots__ = ("_dm", "_literal", "_regex_list")
+
+    def __init__(self, pattern_map: dict[str, int]):
+        self._dm = DomainMatcher()
+        self._literal: dict[str, int] = {}
+        self._regex_list: list[tuple[re.Pattern, int]] = []
+
+        for pattern, value in pattern_map.items():
+            if "*" not in pattern:
+                self._literal[pattern] = value
+            else:
+                self._regex_list.append((self._dm.compile(pattern), value))
+
+    def match(self, domain: str) -> int | None:
+        v = self._literal.get(domain)
+        if v is not None:
+            return v
+        for rx, value in self._regex_list:
+            if rx.match(domain):
+                return value
+        return None
+
+
 if __name__ == "__main__":
     dm = DomainMatcher()
 
