@@ -70,6 +70,14 @@ class AllGNFastCommands:
         Используется для обозначения отказа в обработке запроса.
         """
         cls_command = "gn:app:402"
+    
+    @register_command(('NoResponse'))
+    class NoResponse(GNFastCommand):
+        """
+        # Ответ не предусмотрен
+        Операция выполнена успешно, но ответ не требуется.
+        """
+        cls_command = "gn:transport:0"
        
     @register_command(('UnprocessableEntity', ))
     class UnprocessableEntity(GNFastCommand):
@@ -124,18 +132,6 @@ class AllGNFastCommands:
         Часто используется для API-ответов на невалидные ссылки.
         """
         cls_command = "gn:app:404"
-
-
-    @register_command(('MethodNotAllowed', ))
-    class MethodNotAllowed(GNFastCommand):
-        """
-        # Метод запроса не поддерживается данным ресурсом
-        Ресурс существует, но используемый gn-метод недопустим. 
-        Пример: к ресурсу разрешён только get, а клиент делает post.
-        Используется для ограничения набора действий над конкретными ресурсами.
-        """
-        cls_command = "gn:app:405"
-
 
 
     @register_command(('InternalServerError', ))
@@ -415,6 +411,15 @@ class AllGNFastCommands:
             Запрошенный объект или путь не существует на сервере. 
             Пример: попытка получить пользователя с несуществующим ID.
             Часто используется для API-ответов на невалидные ссылки.
+            """
+            cls_command = "gn:app:404"
+
+        @register_command(("app", 'PathNotFound'))
+        class PathNotFound(GNFastCommand):
+            """
+            # Путь на сервере не найден
+            Запрошенный путь не существует на сервере.
+            Пример: попытка доступа к несуществующему URL-эндоинту
             """
             cls_command = "gn:app:404"
 
