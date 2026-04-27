@@ -233,8 +233,9 @@ class Url:
 class CORSObject:
     def __init__(self,
                  allow_origins: Optional[List[str]] = None,
-                 allow_methods: Optional[List[str]] = None,
+                 allow_object_types: List[Literal['user', 'service', 'freenet', 'company', 'project', 'product']] = ['user', 'service'],
                  allow_client_types: List[Literal['net', 'client', 'server']] = ['net'],
+                 allow_methods: Optional[List[str]] = None,
                  allow_transport_protocols: Optional[List[str]] = None,
                  allow_route_protocols: Optional[List[str]] = None,
                  allow_request_protocols: Optional[List[str]] = None
@@ -244,14 +245,19 @@ class CORSObject:
 
 
         :allow_origins: Список доменов, с которых разрешен запрос.
-        :allow_methods: Разрешенные методы для запроса.
-        :allow_client_types: Какие типы клиентов могут использовать.
-
+        :allow_object_types: Какие типы объектов могут быть доступны.
+        
         - `net` - Пользователи и другие службы сети `GN`
 
         - `client` - (TBD) Пользователи напрямую. Без использования прокси серверов сети `GN`
 
         - `server` - Другие `origin` сервера сети `GN`
+
+        :allow_client_types: Какие типы клиентов могут использовать.
+
+        - `freenet` - доступ для неидентифицируемых объектов из web2.
+
+
 
         :allow_transport_protocols: (TBD)
         :allow_route_protocols: (TBD)
@@ -259,6 +265,7 @@ class CORSObject:
         """
         self.allow_origins = allow_origins
         self.allow_methods = allow_methods
+        self.allow_object_types = allow_object_types
         self.allow_client_types = allow_client_types
         self.allow_transport_protocols = allow_transport_protocols
         self.allow_route_protocols = allow_route_protocols

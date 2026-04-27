@@ -543,6 +543,16 @@ class AllGNFastCommands:
             """
             cls_command = "gn:cors:703"
 
+        @register_command(("cors", 'ObjectTypeNotAllowed'))
+        class ObjectTypeNotAllowed(GNFastCommand):
+            """
+            # CORS Запрещённый тип объекта
+            Тип объекта, указанный в запросе, не разрешён в списке `allow_object_types`.
+            Оприделенные маршруты могут быть доступны ограничены для разных типов.
+            Например: тип `freenet` дает доступ к сервису неидентифицируемым объектам из web2.
+            """
+            cls_command = "gn:cors:708"
+
 
         @register_command(("cors", 'TransportProtocolNotAllowed'))
         class TransportProtocolNotAllowed(GNFastCommand):
