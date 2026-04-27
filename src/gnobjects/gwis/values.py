@@ -6,7 +6,8 @@ tablex_gwis_object_types_int_to_str = {
     5: 'product',
     6: 'service',
     7: 'doo', # Distributed Ownership Object
-    8: 'federation'
+    8: 'federation',
+    255: 'freenet' # access from web2
 }
 
 tablex_gwis_object_types_str_to_int = {value: key for key, value in tablex_gwis_object_types_int_to_str.items()}
