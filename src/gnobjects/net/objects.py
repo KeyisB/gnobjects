@@ -2336,6 +2336,9 @@ class GNResponse(Exception):
     
     def __str__(self) -> str:
         return f"[GNResponse]: {self._command}"
+    
+    async def __reprfull__(self):
+        return f"<GNResponse [{self._command}]: payload: {await self.payload}: cookies: {self._cookies}>"
 
 
 from .fastcommands import AllGNFastCommands, COMMAND_TREE, COMMAND_PREFIX
