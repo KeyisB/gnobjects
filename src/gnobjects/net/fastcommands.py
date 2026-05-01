@@ -345,6 +345,30 @@ class AllGNFastCommands:
             Ошибка указывает, что отсутствует домен, соответствующий указанному keyId.
             """
             cls_command = "gn:transport:19"
+        
+        @register_command(("transport", 'EncryptionKeySynchronization'))
+        class EncryptionKeySynchronization(GNFastCommand):
+            """
+            # Ошибка при синхронизации ключей шифрования
+            Сервер не смог расшифровать пакет из-за рассинхронизации ключей шифрования.
+            """
+            cls_command = "gn:transport:20"
+
+        @register_command(("transport", 'UnsupportedKeyType'))
+        class UnsupportedKeyType(GNFastCommand):
+            """
+            # Неподдерживаемый тип ключа
+            Тип ключа может быть:
+
+            - `255` - локальный ключ kdc <-> kdc сервер
+            - `251` - ключ соединения (синхронизация через второй kdc сервер)
+            - `0` - ключ соединения (синхронизация через первый kdc сервер)
+            - `1-100` - гарантированно свободные типы ключей
+
+            Если сервер не смог обработать данный тип ключа, он возвращает эту ошибку.
+
+            """
+            cls_command = "gn:transport:21"
     
     class app:
         """
