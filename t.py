@@ -6,7 +6,7 @@ from gnobjects.net.objects import Url
 
 
 
-x = Url("gn://gn-dns~v1.sys/api/x")
+x = Url("gn://@hub/api/x")
 
 
 print(x.hostname)

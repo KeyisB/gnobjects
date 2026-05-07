@@ -445,7 +445,7 @@ class AllGNFastCommands:
             Запрошенный путь не существует на сервере.
             Пример: попытка доступа к несуществующему URL-эндоинту
             """
-            cls_command = "gn:app:404"
+            cls_command = "gn:app:407"
 
 
         @register_command(("app", 'MethodNotAllowed'))
