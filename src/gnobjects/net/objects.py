@@ -234,7 +234,7 @@ class CORSObject:
     def __init__(self,
                  allow_origins: Optional[List[str]] = None,
                  allow_object_types: List[Literal['user', 'service', 'freenet', 'company', 'project', 'product']] = ['user', 'service'],
-                 allow_client_types: List[Literal['net', 'client', 'server']] = ['net'],
+                 allow_client_types: List[Literal['net', 'client', 'server', 'local']] = ['net', 'local'],
                  allow_methods: Optional[List[str]] = None,
                  allow_transport_protocols: Optional[List[str]] = None,
                  allow_route_protocols: Optional[List[str]] = None,
@@ -252,6 +252,8 @@ class CORSObject:
         - `client` - (TBD) Пользователи напрямую. Без использования прокси серверов сети `GN`
 
         - `server` - Другие `origin` сервера сети `GN`
+
+        - `local` - Локальные клиенты
 
         :allow_client_types: Какие типы клиентов могут использовать.
 
@@ -1306,7 +1308,8 @@ class GNRequest:
                 0: 'gn',
                 1: 'net',
                 2: 'server',
-                4: 'client'
+                4: 'client',
+                5: 'local'
             }
         
         def __init__(self, request: 'GNRequest') -> None:
@@ -1341,7 +1344,7 @@ class GNRequest:
             return self._data.get("remote_addr", ())[1]
         
         @property
-        def type(self) -> Literal['net', 'client', 'server']:
+        def type(self) -> Literal['net', 'client', 'server', 'local']:
             """
             # Тип клиента
 
@@ -1350,13 +1353,15 @@ class GNRequest:
             - `client` - Пользователи напрямую. Без использования прокси серверов сети `GN`
 
             - `server` - Другие `origin` сервера сети `GN`
-                
-            :return: Literal['net', 'client', 'server']
+
+            - `local` - Локальные клиенты
+
+            :return: Literal['net', 'client', 'server', 'local']
             """
             return self.model_client_types[self._data.get('client-type', 1)] # type: ignore
         
         @property
-        def type_int(self) -> Literal[1, 4, 2]:
+        def type_int(self) -> Literal[1, 4, 2, 5]:
             """
             # Тип клиента (int)
 
@@ -1365,6 +1370,8 @@ class GNRequest:
             - `4` - client - Пользователи напрямую. Без использования прокси серверов сети `GN`
 
             - `2` - server - Другие `origin` сервера сети `GN`
+
+            - `5` - local - Локальные клиенты
             
             :return: int
             """
@@ -1681,6 +1688,8 @@ class GNRequest:
             ct = 4
         elif GNDomain.isCore(d):
             ct = 0
+        elif self.client.remote_addr and self.client.remote_addr[0] in ('::1', '127.0.0.1', '::ffff:127.0.0.1', 'localhost'):
+            ct = 5
         else:
             ct = 2
 
