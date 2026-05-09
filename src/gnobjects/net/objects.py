@@ -634,10 +634,6 @@ class _AsyncPayloadState:
             self.finish(True)
 
     @property
-    def payloadReady(self) -> bool:
-        return self._payload_complete
-
-    @property
     def payloadComplete(self) -> bool:
         return self._payload_complete
 
@@ -645,13 +641,21 @@ class _AsyncPayloadState:
     def payloadIncomplete(self) -> bool:
         return self._payload_incomplete
 
-    @property
-    def currentPayload(self) -> bytes:
+    def _materialize_complete_payload(self) -> bytes:
         if self._consumed:
             raise RuntimeError('Payload is already being streamed; full payload is no longer available')
+        if not self._payload_complete:
+            raise RuntimeError('Payload is not complete')
+        self._claim_consumer('materialize')
         if self._materialized_payload is not None:
             return self._materialized_payload
-        return b''.join(self._chunks)
+        self._materialized_payload = b''.join(self._chunks)
+        self._chunks.clear()
+        if self._materialized_payload:
+            self._chunks.append(self._materialized_payload)
+        self._buffered_size = len(self._materialized_payload)
+        self._consumed = 0
+        return self._materialized_payload
 
     @property
     def headerReady(self) -> bool:
@@ -844,14 +848,7 @@ class _AsyncPayloadState:
         while True:
             self._raise_failure()
             if self._payload_complete:
-                if self._materialized_payload is None:
-                    self._materialized_payload = b''.join(self._chunks)
-                    self._chunks.clear()
-                    if self._materialized_payload:
-                        self._chunks.append(self._materialized_payload)
-                    self._buffered_size = len(self._materialized_payload)
-                    self._consumed = 0
-                return self._materialized_payload
+                return self._materialize_complete_payload()
             if self._payload_incomplete:
                 return None
             await self._wait_for_completion()
@@ -1003,9 +1000,6 @@ class _PayloadIterProxy:
     - `obj.iter.payload(chunk_size)` отдаёт только внутренний payload контейнера,
         без header контейнера, а если в header указана компрессия, то потоково
         декомпрессирует bytes перед выдачей
-    - `obj.iter.currentPayload` возвращает уже накопленную на данный момент часть
-        wire-payload без ожидания
-
     Во всех итераторах `chunk_size` задаёт желаемый размер выдачи. Данные режутся
     не так, как пришли по сети, а именно по указанному размеру чанка, за исключением
     последнего чанка.
@@ -1049,24 +1043,6 @@ class _PayloadIterProxy:
         ```
         """
         return self._state.get_container_header()
-
-    @property
-    def currentPayload(self) -> bytes:
-        """
-        # Уже полученная часть wire-payload
-
-        Возвращает bytes без ожидания. Это именно те байты payload уровня
-        `GNRequest` / `GNResponse`, которые уже накоплены во внутреннем буфере.
-
-        Важно:
-
-        - сюда входит header контейнера `TempDataObject`, если он уже пришёл
-        - это не обязательно полный payload
-        - это не распакованный payload контейнера
-
-        Свойство удобно для мониторинга прогресса загрузки или для отладки.
-        """
-        return self._state.currentPayload
 
     def raw(self, chunk_size: int) -> AsyncGenerator[Optional[bytes], None]:
         """
@@ -1267,7 +1243,6 @@ class GNRequest:
         - `request.iter.raw(chunk_size)`
         - `request.iter.tdo(chunk_size)`
         - `request.iter.payload(chunk_size)`
-        - `request.iter.currentPayload`
 
         Этот API предназначен для сценариев, где обработка начинается сразу после
         получения header `GNRequest`, а payload продолжает догружаться позже.
@@ -1562,7 +1537,7 @@ class GNRequest:
         if self._tdo is not None:
             payload = self._tdo.serialize()
         elif self.hasPayload:
-            payload = self._payload_state.currentPayload
+            payload = self._payload_state._materialize_complete_payload()
         else:
             payload = None
 
@@ -1674,7 +1649,7 @@ class GNRequest:
             if self._tdo is not None:
                 raw = self._tdo.serialize()
             elif self.hasPayload:
-                raw = self._payload_state.currentPayload
+                raw = self._payload_state._materialize_complete_payload()
             else:
                 raw = None
             if raw:
@@ -1684,7 +1659,7 @@ class GNRequest:
         if self._payload_source_consumed:
             if self._tdo is None and not self._payload_state.payloadComplete:
                 raise RuntimeError('Async payload source was already consumed')
-            raw = self._tdo.serialize() if self._tdo is not None else self._payload_state.currentPayload
+            raw = self._tdo.serialize() if self._tdo is not None else self._payload_state._materialize_complete_payload()
             if raw:
                 yield raw
             return
@@ -2163,9 +2138,6 @@ class GNResponse(Exception):
         Полностью симметричен `request.iter`.
         """
 
-    def assembly(self): ... # legacy
-        
-
     def serialize(self) -> bytes:
         """
         # Полная сериализация ответа
@@ -2186,7 +2158,7 @@ class GNResponse(Exception):
         if self._tdo is not None:
             payload = self._tdo.serialize()
         elif self.hasPayload:
-            payload = self._payload_state.currentPayload
+            payload = self._payload_state._materialize_complete_payload()
         else:
             payload = None
         
@@ -2271,7 +2243,7 @@ class GNResponse(Exception):
             if self._tdo is not None:
                 raw = self._tdo.serialize()
             elif self.hasPayload:
-                raw = self._payload_state.currentPayload
+                raw = self._payload_state._materialize_complete_payload()
             else:
                 raw = None
             if raw:
@@ -2281,7 +2253,7 @@ class GNResponse(Exception):
         if self._payload_source_consumed:
             if self._tdo is None and not self._payload_state.payloadComplete:
                 raise RuntimeError('Async payload source was already consumed')
-            raw = self._tdo.serialize() if self._tdo is not None else self._payload_state.currentPayload
+            raw = self._tdo.serialize() if self._tdo is not None else self._payload_state._materialize_complete_payload()
             if raw:
                 yield raw
             return
