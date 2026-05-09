@@ -721,6 +721,9 @@ class _AsyncPayloadState:
         if self._container_header is not _PAYLOAD_NOT_READY:
             return
 
+        if self._consumed:
+            return
+
         if not self.hasPayload or self.payloadSize == 0:
             self._container_header = None
             self._container_header_len = 0
@@ -802,6 +805,9 @@ class _AsyncPayloadState:
             return self._container_header is not _PAYLOAD_NOT_READY
         return self._buffered_size > 0
 
+    def _has_completion(self) -> bool:
+        return self._failure is not None or self._payload_complete or self._payload_incomplete
+
     async def _wait_for_progress(self, container_wait: bool = False) -> None:
         self._raise_failure()
 
@@ -812,6 +818,20 @@ class _AsyncPayloadState:
 
         self._raise_failure()
         if self._has_progress(container_wait):
+            if not fut.done():
+                fut.set_result(None)
+        await fut
+        self._raise_failure()
+
+    async def _wait_for_completion(self) -> None:
+        self._raise_failure()
+
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[None] = loop.create_future()
+        self._waiters.append(fut)
+
+        self._raise_failure()
+        if self._has_completion():
             if not fut.done():
                 fut.set_result(None)
         await fut
@@ -834,7 +854,7 @@ class _AsyncPayloadState:
                 return self._materialized_payload
             if self._payload_incomplete:
                 return None
-            await self._wait_for_progress()
+            await self._wait_for_completion()
 
     async def get_container_header(self) -> Optional[STPContainer | ITPContainer]:
         while True:
@@ -892,7 +912,7 @@ class _AsyncPayloadState:
                 return
             if payload_only:
                 header_len = cast(int, self._container_header_len)
-                compression_info = cast(Tuple[int, int, int, int], getattr(header, 'compression_info', (0, 0, 0, 0)) or (0, 0, 0, 0))
+                compression_info = cast(Tuple[int, int, int, int], header.compression_info or (0, 0, 0, 0))
 
         if not self.hasPayload:
             return
@@ -1173,8 +1193,9 @@ class GNRequest:
         :param route: Route bucket запроса.
         :param origin: Origin страницы или источника запроса.
         :param payloadSize:
-            Полная длина wire-payload в байтах. Обязательна, если `payload` передан как
-            `AsyncIterable[bytes]`, потому что header запроса теперь содержит длину payload.
+            Полная длина wire-payload в байтах, если отправитель хочет объявить ее заранее.
+            Для `AsyncIterable[bytes]` можно оставить `None`: header будет содержать маркер неизвестной длины,
+            а transport завершит payload по end_stream.
 
         Важно:
 
@@ -1561,7 +1582,7 @@ class GNRequest:
 
         Возвращает только header `GNRequest`, без payload.
 
-        Header уже содержит длину payload, поэтому принимающая сторона может:
+        Header уже содержит длину payload или маркер неизвестной длины, поэтому принимающая сторона может:
 
         - создать объект `GNRequest`
         - немедленно передать его в обработку
@@ -1742,7 +1763,7 @@ class GNRequest:
 
         - `request` — уже созданный объект `GNRequest` без полного payload
         - `payload_offset` — смещение в буфере, с которого начинаются байты payload
-        - `payload_length` — ожидаемая длина payload в байтах
+        - `payload_length` — ожидаемая длина payload в байтах или `None`, если длина неизвестна до end_stream
 
         Это ключевая точка для раннего запуска обработчика по одному только header.
         """
@@ -1807,7 +1828,8 @@ class GNRequest:
         - `end_stream=True` означает, что stream завершился штатно
         - `end_stream=False` означает, что payload считается неполным
 
-        После штатного завершения метод автоматически связывает собранные bytes с `tdo`.
+        После штатного завершения метод только помечает payload завершенным. `tdo` создается лениво,
+        если принимающая сторона явно запросит `await request.tdo`.
         """
         self._payload_state.finish(end_stream)
 
@@ -1986,7 +2008,7 @@ class GNRequest:
         """
         # Размер wire-payload в байтах
 
-        Возвращает длину payload уровня `GNRequest` в байтах.
+        Возвращает длину payload уровня `GNRequest` в байтах или `None`, если длина неизвестна до end_stream.
 
         Это не размер уже распакованного Python-объекта, а длина сериализованного payload,
         который идёт после header `GNRequest`.
@@ -2096,8 +2118,8 @@ class GNResponse(Exception):
 
         :param cookies: Метаданные ответа.
         :param payloadSize:
-            Обязательная полная длина wire-payload, если `payload` передан как
-            `AsyncIterable[bytes]`.
+            Полная длина wire-payload, если отправитель хочет объявить ее заранее.
+            Для `AsyncIterable[bytes]` можно оставить `None`: header будет содержать маркер неизвестной длины.
 
         Важно: если `payload` передаётся как поток bytes, предполагается, что это уже
         сериализованный payload контейнера `TempDataObject`, а не Python-объект, который
@@ -2371,8 +2393,8 @@ class GNResponse(Exception):
 
         Помечает payload ответа как полный или неполный.
 
-        Если payload завершился штатно и полностью, объект ответа автоматически
-        получает готовый `TempDataObject`.
+        Если payload завершился штатно и полностью, метод только помечает поток завершенным.
+        `TempDataObject` создается лениво, если принимающая сторона явно запросит `await response.tdo`.
         """
         self._payload_state.finish(end_stream)
     
@@ -2491,7 +2513,8 @@ class GNResponse(Exception):
         """
         # Размер wire-payload ответа в байтах
 
-        Возвращает длину payload уровня `GNResponse` в байтах, без header самого ответа.
+        Возвращает длину payload уровня `GNResponse` в байтах, без header самого ответа,
+        или `None`, если длина неизвестна до end_stream.
         """
         return self._payload_state.payloadSize
     

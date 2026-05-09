@@ -1,4 +1,4 @@
-from typing import Optional, Union, List
+from typing import Optional, Union, List, AsyncIterable
 
 from KeyisBTools.models.serialization import SerializableType
 
@@ -32,7 +32,7 @@ class GNFastCommand(GNResponse):
     # Быстрый ответ
     """
     def __init__(self,
-                 payload: Optional[Union[SerializableType, TempDataGroup, TempDataObject]] = None,
+                 payload: Optional[Union[SerializableType, TempDataObject, AsyncIterable[bytes]]] = None,
                  cookies: Optional[dict] = None
                  ) -> None:
 
@@ -52,7 +52,7 @@ class AllGNFastCommands:
         """
         cls_command = True
         def __init__(self,
-                 payload: Optional[Union[SerializableType, TempDataGroup, TempDataObject]] = None,
+                 payload: Optional[Union[SerializableType, TempDataObject, AsyncIterable[bytes]]] = None,
                  cookies: Optional[dict] = None
                  ) -> None:
             """
