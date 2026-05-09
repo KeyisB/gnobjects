@@ -3,6 +3,7 @@ import os
 import ast
 import asyncio
 import zstandard as zstd
+from collections import deque
 from typing import Optional, Dict, Any, List, Union, Literal, Tuple, cast, overload, AsyncIterable, AsyncGenerator
 import anyio
 from pathlib import Path
@@ -325,6 +326,79 @@ class FileObject:
         tdo = TempDataObject.ITP(m if interpreterType is None else interpreterType, d, v if interpretatorVersion == 0 else interpretatorVersion, compression_info)
         return tdo
 
+    async def _iter_data(self, chunk_size: int) -> AsyncGenerator[bytes, None]:
+        if chunk_size <= 0:
+            raise ValueError('chunk_size must be > 0')
+
+        if self._data is not None:
+            for i in range(0, len(self._data), chunk_size):
+                yield self._data[i:i + chunk_size]
+            return
+
+        if not isinstance(self._path, (str, Path)):
+            raise Exception('File assembly error -> Path is not str or Path')
+
+        if not os.path.exists(self._path):
+            raise Exception(f'File assembly error -> File not found {self._path}')
+
+        try:
+            async with await anyio.open_file(str(self._path), mode="rb") as file:
+                while True:
+                    chunk = await file.read(chunk_size)
+                    if not chunk:
+                        break
+                    yield chunk
+        except Exception as e:
+            raise Exception(f'File assembly error -> File read error: {e}')
+
+    async def toIterTempDataObject(
+        self,
+        interpreterType: int | str | None = None,
+        interpretatorVersion: int = 0,
+        compression_info: tuple[int, int, int, int] | None = None,
+        chunk_size: int = 1024 * 1024
+    ) -> AsyncGenerator[bytes, None]:
+        m = cast(str, self._inType)
+
+        if m.count(':') == 1 and '/' not in m: # one interpret with version
+            m, v_raw = m.rsplit(':', 1)
+            v = int(v_raw)
+        else:
+            v = 0
+
+        header, compression_support = _Aracada_container_packer.encode_itp_header(
+            m if interpreterType is None else interpreterType,
+            v if interpretatorVersion == 0 else interpretatorVersion,
+            compression_info
+        )
+        yield header
+
+        on, use_map, alg, level = compression_support
+        if not on:
+            async for chunk in self._iter_data(chunk_size):
+                if chunk:
+                    yield chunk
+            return
+
+        if use_map:
+            raise NotImplementedError("Pretrained map compression not implemented")
+        if alg != 0:
+            raise NotImplementedError(f"Unknown compression algorithm code: {alg}")
+
+        compressor = _Aracada_container_packer._cctx_dict.get(level)
+        if compressor is None:
+            raise ValueError(f"Unknown compression level code: {level}. Supported levels: 0-3")
+
+        cobj = compressor.compressobj()
+        async for chunk in self._iter_data(chunk_size):
+            out = cobj.compress(chunk)
+            if out:
+                yield out
+
+        tail = cobj.flush(zstd.COMPRESSOBJ_FLUSH_FINISH)
+        if tail:
+            yield tail
+
 
 class STPContainer:
     __slots__ = ['version', 'payload', 'compression_info']
@@ -513,13 +587,29 @@ _PAYLOAD_NOT_READY = object()
 
 class _AsyncPayloadState:
     __slots__ = [
-        'payloadSize', '_payload', '_payload_complete', '_payload_incomplete', '_waiters',
-        '_container_header', '_container_header_len', '_container_waiters', '_failure'
+        'payloadSize', 'hasPayload', '_chunks', '_buffered_size', '_received', '_consumed',
+        '_payload_complete', '_payload_incomplete', '_waiters',
+        '_container_header', '_container_header_len', '_container_waiters', '_failure',
+        '_consumer', '_materialized_payload', '_header_probe', '_header_probe_target'
     ]
 
-    def __init__(self, payload_size: int = 0, initial_payload: bytes | None = None, complete: bool = False) -> None:
+    def __init__(
+        self,
+        payload_size: Optional[int] = 0,
+        initial_payload: bytes | None = None,
+        complete: bool = False,
+        has_payload: Optional[bool] = None
+    ) -> None:
         self.payloadSize = payload_size
-        self._payload = bytearray(initial_payload or b'')
+        self.hasPayload = bool(
+            has_payload
+            if has_payload is not None
+            else (payload_size is None or bool(payload_size) or initial_payload is not None)
+        )
+        self._chunks: deque[bytes] = deque()
+        self._buffered_size = 0
+        self._received = 0
+        self._consumed = 0
         self._payload_complete = False
         self._payload_incomplete = False
         self._waiters: list[asyncio.Future[None]] = []
@@ -527,8 +617,17 @@ class _AsyncPayloadState:
         self._container_header_len: Optional[int] = None
         self._container_waiters: list[asyncio.Future[None]] = []
         self._failure: Optional[Exception] = None
+        self._consumer: Optional[Literal['stream', 'materialize']] = None
+        self._materialized_payload: Optional[bytes] = None
+        self._header_probe = bytearray()
+        self._header_probe_target = 64
 
-        if self._payload:
+        if initial_payload is not None:
+            blob = bytes(initial_payload)
+            if blob:
+                self._chunks.append(blob)
+                self._buffered_size = len(blob)
+                self._received = len(blob)
             self._try_parse_container_header()
 
         if complete:
@@ -548,7 +647,11 @@ class _AsyncPayloadState:
 
     @property
     def currentPayload(self) -> bytes:
-        return bytes(self._payload)
+        if self._consumed:
+            raise RuntimeError('Payload is already being streamed; full payload is no longer available')
+        if self._materialized_payload is not None:
+            return self._materialized_payload
+        return b''.join(self._chunks)
 
     @property
     def headerReady(self) -> bool:
@@ -566,9 +669,12 @@ class _AsyncPayloadState:
         if not chunk:
             return
 
-        self._payload.extend(chunk)
+        self.hasPayload = True
+        self._chunks.append(chunk)
+        self._buffered_size += len(chunk)
+        self._received += len(chunk)
 
-        if len(self._payload) > self.payloadSize:
+        if self.payloadSize is not None and self._received > self.payloadSize:
             self._failure = ValueError('Payload exceeds declared payloadSize')
 
         self._try_parse_container_header()
@@ -585,7 +691,7 @@ class _AsyncPayloadState:
             self._notify_all()
             return
 
-        if len(self._payload) != self.payloadSize:
+        if self.payloadSize is not None and self._received != self.payloadSize:
             self._payload_incomplete = True
         else:
             self._payload_complete = True
@@ -615,18 +721,31 @@ class _AsyncPayloadState:
         if self._container_header is not _PAYLOAD_NOT_READY:
             return
 
-        if self.payloadSize == 0:
+        if not self.hasPayload or self.payloadSize == 0:
             self._container_header = None
             self._container_header_len = 0
             return
 
-        try:
-            header, header_len = unpack_temp_data_header(bytes(self._payload))
-        except IncompleteGNFrameError:
-            return
-        except Exception as exc:
-            self._failure = exc
-            return
+        while True:
+            self._fill_header_probe()
+            if not self._header_probe:
+                return
+
+            try:
+                header, header_len = unpack_temp_data_header(bytes(self._header_probe))
+            except IncompleteGNFrameError:
+                if self._payload_complete or self._payload_incomplete:
+                    self._container_header = None
+                    self._container_header_len = 0
+                    return
+                if len(self._header_probe) >= self._header_probe_target and self._header_probe_target < self._received:
+                    self._header_probe_target = min(self._received, self._header_probe_target * 2)
+                    continue
+                return
+            except Exception as exc:
+                self._failure = exc
+                return
+            break
 
         if header['container_type'] == 1:
             container: STPContainer | ITPContainer = ITPContainer(
@@ -644,6 +763,45 @@ class _AsyncPayloadState:
         self._container_header = container
         self._container_header_len = header_len
 
+    def _fill_header_probe(self) -> None:
+        if len(self._header_probe) >= self._header_probe_target:
+            return
+
+        need = self._header_probe_target - len(self._header_probe)
+        copied = 0
+        seen = 0
+        for chunk in self._chunks:
+            chunk_len = len(chunk)
+            if seen + chunk_len <= len(self._header_probe):
+                seen += chunk_len
+                continue
+
+            start = max(0, len(self._header_probe) - seen)
+            take = min(chunk_len - start, need - copied)
+            if take <= 0:
+                break
+            self._header_probe.extend(chunk[start:start + take])
+            copied += take
+            seen += chunk_len
+            if copied >= need:
+                break
+
+    def _claim_consumer(self, consumer: Literal['stream', 'materialize']) -> None:
+        if self._consumer is None:
+            self._consumer = consumer
+            return
+        if self._consumer != consumer:
+            if self._consumer == 'stream' and consumer == 'materialize':
+                raise RuntimeError('Payload is already being streamed; await payload/tdo is not allowed')
+            raise RuntimeError('Payload is already being materialized; streaming is not allowed')
+
+    def _has_progress(self, container_wait: bool = False) -> bool:
+        if self._failure is not None or self._payload_complete or self._payload_incomplete:
+            return True
+        if container_wait:
+            return self._container_header is not _PAYLOAD_NOT_READY
+        return self._buffered_size > 0
+
     async def _wait_for_progress(self, container_wait: bool = False) -> None:
         self._raise_failure()
 
@@ -653,14 +811,27 @@ class _AsyncPayloadState:
         waiters.append(fut)
 
         self._raise_failure()
+        if self._has_progress(container_wait):
+            if not fut.done():
+                fut.set_result(None)
         await fut
         self._raise_failure()
 
     async def get_raw_payload(self) -> Optional[bytes]:
+        if not self.hasPayload:
+            return None
+        self._claim_consumer('materialize')
         while True:
             self._raise_failure()
             if self._payload_complete:
-                return bytes(self._payload)
+                if self._materialized_payload is None:
+                    self._materialized_payload = b''.join(self._chunks)
+                    self._chunks.clear()
+                    if self._materialized_payload:
+                        self._chunks.append(self._materialized_payload)
+                    self._buffered_size = len(self._materialized_payload)
+                    self._consumed = 0
+                return self._materialized_payload
             if self._payload_incomplete:
                 return None
             await self._wait_for_progress()
@@ -670,24 +841,68 @@ class _AsyncPayloadState:
             self._raise_failure()
             if self._container_header is not _PAYLOAD_NOT_READY:
                 return cast(Optional[STPContainer | ITPContainer], self._container_header)
+            if self._consumer == 'stream' and self._consumed:
+                raise RuntimeError('Payload stream has already been consumed; container header is no longer available')
             if self._payload_incomplete:
                 return None
             await self._wait_for_progress(container_wait=True)
+
+    def _pop_chunk(self, max_size: int) -> bytes:
+        if max_size <= 0 or self._buffered_size <= 0:
+            return b''
+
+        first = self._chunks.popleft()
+        if len(first) <= max_size:
+            self._buffered_size -= len(first)
+            self._consumed += len(first)
+            return first
+
+        out = first[:max_size]
+        rest = first[max_size:]
+        self._chunks.appendleft(rest)
+        self._buffered_size -= len(out)
+        self._consumed += len(out)
+        return out
+
+    async def _discard_bytes(self, size: int) -> bool:
+        remaining = size
+        while remaining > 0:
+            self._raise_failure()
+            if self._buffered_size > 0:
+                chunk = self._pop_chunk(remaining)
+                remaining -= len(chunk)
+                continue
+            if self._payload_complete:
+                return False
+            if self._payload_incomplete:
+                return False
+            await self._wait_for_progress()
+        return True
 
     async def iter_bytes(self, chunk_size: int, *, require_container_header: bool, payload_only: bool) -> AsyncGenerator[Optional[bytes], None]:
         if chunk_size <= 0:
             raise ValueError('chunk_size must be > 0')
 
-        offset = 0
         compression_info = (0, 0, 0, 0)
+        header_len = 0
         if require_container_header or payload_only:
             header = await self.get_container_header()
             if header is None:
                 yield None
                 return
             if payload_only:
-                offset = cast(int, self._container_header_len)
+                header_len = cast(int, self._container_header_len)
                 compression_info = cast(Tuple[int, int, int, int], getattr(header, 'compression_info', (0, 0, 0, 0)) or (0, 0, 0, 0))
+
+        if not self.hasPayload:
+            return
+
+        self._claim_consumer('stream')
+
+        if payload_only and header_len:
+            if not await self._discard_bytes(header_len):
+                yield None
+                return
 
         if payload_only and compression_info[0]:
             on, use_map, alg, level = compression_info
@@ -697,30 +912,31 @@ class _AsyncPayloadState:
                 raise NotImplementedError(f'Unknown compression algorithm code: {alg}')
 
             decompressor = zstd.ZstdDecompressor().decompressobj(write_size=chunk_size)
-            compressed_offset = offset
             decompressed = bytearray()
 
             while True:
                 self._raise_failure()
-                available = len(self._payload)
 
-                if available > compressed_offset:
+                while self._buffered_size > 0:
+                    compressed = self._pop_chunk(chunk_size)
                     try:
-                        decompressed.extend(decompressor.decompress(bytes(self._payload[compressed_offset:available])))
+                        decompressed.extend(decompressor.decompress(compressed))
                     except zstd.ZstdError as exc:
                         raise ValueError(f'Decompression failed: {exc}') from exc
-                    compressed_offset = available
 
-                while len(decompressed) >= chunk_size:
-                    yield bytes(decompressed[:chunk_size])
-                    del decompressed[:chunk_size]
+                    while len(decompressed) >= chunk_size:
+                        yield bytes(decompressed[:chunk_size])
+                        del decompressed[:chunk_size]
 
                 if self._payload_complete:
+                    try:
+                        tail = decompressor.flush()
+                    except zstd.ZstdError as exc:
+                        raise ValueError(f'Decompression failed: {exc}') from exc
+                    if tail:
+                        decompressed.extend(tail)
                     if not decompressor.eof:
-                        if decompressed:
-                            yield bytes(decompressed)
-                        yield None
-                        return
+                        raise ValueError('Compressed payload ended before zstd frame was complete')
 
                     if decompressed:
                         yield bytes(decompressed)
@@ -736,22 +952,13 @@ class _AsyncPayloadState:
 
         while True:
             self._raise_failure()
-            available = len(self._payload)
-
-            while available - offset >= chunk_size:
-                end = offset + chunk_size
-                yield bytes(self._payload[offset:end])
-                offset = end
-                available = len(self._payload)
+            while self._buffered_size > 0:
+                yield self._pop_chunk(chunk_size)
 
             if self._payload_complete:
-                if available > offset:
-                    yield bytes(self._payload[offset:available])
                 return
 
             if self._payload_incomplete:
-                if available > offset:
-                    yield bytes(self._payload[offset:available])
                 yield None
                 return
 
@@ -988,10 +1195,8 @@ class GNRequest:
         self._payload_source_consumed = False
 
         if _is_async_payload_source(payload):
-            if payloadSize is None:
-                raise ValueError('payloadSize is required for async payload sources')
             self._payload_source = cast(AsyncIterable[bytes], payload)
-            self._payload_state = _AsyncPayloadState(payload_size=payloadSize)
+            self._payload_state = _AsyncPayloadState(payload_size=payloadSize, has_payload=True)
         else:
             if isinstance(payload, TempDataObject):
                 self._tdo = payload
@@ -1000,9 +1205,10 @@ class GNRequest:
 
             raw_payload = self._tdo.serialize() if self._tdo is not None else None
             self._payload_state = _AsyncPayloadState(
-                payload_size=len(raw_payload or b''),
+                payload_size=len(raw_payload) if raw_payload is not None else 0,
                 initial_payload=raw_payload,
-                complete=True
+                complete=True,
+                has_payload=raw_payload is not None
             )
 
         if self._cookies is None:
@@ -1332,7 +1538,12 @@ class GNRequest:
             cookies.update(self._cookies)
 
         raw_cookies = serialize(cookies) if cookies != {} else None
-        payload = self._tdo.serialize() if self._tdo is not None else self._payload_state.currentPayload
+        if self._tdo is not None:
+            payload = self._tdo.serialize()
+        elif self.hasPayload:
+            payload = self._payload_state.currentPayload
+        else:
+            payload = None
 
         return pack_gnrequest(
             version,
@@ -1374,7 +1585,7 @@ class GNRequest:
             self._route,
             self._method,
             self.url.toString().encode(),
-            self.payloadSize,
+            -1 if self.hasPayload and self.payloadSize is None else (self.payloadSize if self.hasPayload else None),
             raw_cookies
         )
 
@@ -1405,7 +1616,8 @@ class GNRequest:
                 self._payload_state.feed(blob)
 
             self._payload_source_consumed = True
-            if total != self._payload_state.payloadSize:
+            expected = self._payload_state.payloadSize
+            if expected is not None and total != expected:
                 raise ValueError('Async payload source length does not match payloadSize')
             self._payload_state.finish(True)
         except Exception as exc:
@@ -1413,7 +1625,9 @@ class GNRequest:
             self._payload_state.fail(exc)
             raise
 
-        raw = self._payload_state.currentPayload
+        raw = await self._payload_state.get_raw_payload()
+        if raw is None:
+            return None
         self.setSerializedPayload(raw)
         return raw
 
@@ -1436,13 +1650,20 @@ class GNRequest:
         их поступления из этого источника.
         """
         if self._payload_source is None:
-            raw = self._tdo.serialize() if self._tdo is not None else self._payload_state.currentPayload
+            if self._tdo is not None:
+                raw = self._tdo.serialize()
+            elif self.hasPayload:
+                raw = self._payload_state.currentPayload
+            else:
+                raw = None
             if raw:
                 yield raw
             return
 
         if self._payload_source_consumed:
-            raw = self._payload_state.currentPayload
+            if self._tdo is None and not self._payload_state.payloadComplete:
+                raise RuntimeError('Async payload source was already consumed')
+            raw = self._tdo.serialize() if self._tdo is not None else self._payload_state.currentPayload
             if raw:
                 yield raw
             return
@@ -1454,19 +1675,16 @@ class GNRequest:
                     raise TypeError('Async payload source must yield bytes')
                 blob = bytes(chunk)
                 total += len(blob)
-                self._payload_state.feed(blob)
                 yield blob
 
             self._payload_source_consumed = True
-            if total != self._payload_state.payloadSize:
+            expected = self._payload_state.payloadSize
+            if expected is not None and total != expected:
                 raise ValueError('Async payload source length does not match payloadSize')
-            self._payload_state.finish(True)
         except Exception as exc:
             self._payload_source_consumed = True
             self._payload_state.fail(exc)
             raise
-
-        self.setSerializedPayload(self._payload_state.currentPayload)
 
     @staticmethod
     def deserialize(data: bytes) -> 'GNRequest':
@@ -1509,7 +1727,7 @@ class GNRequest:
             raise Exception(f'Unsupported GNRequest version: {version}')
 
     @staticmethod
-    def try_deserialize_header(data: bytes) -> Optional[Tuple['GNRequest', int, int]]:
+    def try_deserialize_header(data: bytes) -> Optional[Tuple['GNRequest', int, Optional[int]]]:
         """
         # Попытка разобрать только header запроса
 
@@ -1545,10 +1763,13 @@ class GNRequest:
         )
         request._tdo = None
         request.__raw_payload_cache = None
-        request._payload_state = _AsyncPayloadState(payload_size=int(d.get('payload_length', 0)))
+        request._payload_state = _AsyncPayloadState(
+            payload_size=cast(Optional[int], d.get('payload_length', 0)),
+            has_payload=bool(d.get('payload_present', False))
+        )
         request.iter = _PayloadIterProxy(request._payload_state)
 
-        return request, payload_offset, int(d.get('payload_length', 0))
+        return request, payload_offset, cast(Optional[int], d.get('payload_length', 0))
 
     def setSerializedPayload(self, payload: bytes | bytearray | memoryview | None):
         """
@@ -1589,8 +1810,6 @@ class GNRequest:
         После штатного завершения метод автоматически связывает собранные bytes с `tdo`.
         """
         self._payload_state.finish(end_stream)
-        if self._payload_state.payloadComplete:
-            self.setSerializedPayload(self._payload_state.currentPayload)
 
     def _assembly_server(self):
         d: str = self.client._data['domain']
@@ -1751,14 +1970,19 @@ class GNRequest:
         self._payload_source = None
         self._payload_source_consumed = False
         self._payload_state = _AsyncPayloadState(
-            payload_size=len(raw_payload or b''),
+            payload_size=len(raw_payload) if raw_payload is not None else 0,
             initial_payload=raw_payload,
-            complete=True
+            complete=True,
+            has_payload=raw_payload is not None
         )
         self.iter = _PayloadIterProxy(self._payload_state)
 
     @property
-    def payloadSize(self) -> int:
+    def hasPayload(self) -> bool:
+        return self._payload_state.hasPayload
+
+    @property
+    def payloadSize(self) -> Optional[int]:
         """
         # Размер wire-payload в байтах
 
@@ -1892,10 +2116,8 @@ class GNResponse(Exception):
         self._payload_source_consumed = False
 
         if _is_async_payload_source(payload):
-            if payloadSize is None:
-                raise ValueError('payloadSize is required for async payload sources')
             self._payload_source = cast(AsyncIterable[bytes], payload)
-            self._payload_state = _AsyncPayloadState(payload_size=payloadSize)
+            self._payload_state = _AsyncPayloadState(payload_size=payloadSize, has_payload=True)
         else:
             if isinstance(payload, TempDataObject):
                 self._tdo = payload
@@ -1905,9 +2127,10 @@ class GNResponse(Exception):
 
             raw_payload = self._tdo.serialize() if self._tdo is not None else None
             self._payload_state = _AsyncPayloadState(
-                payload_size=len(raw_payload or b''),
+                payload_size=len(raw_payload) if raw_payload is not None else 0,
                 initial_payload=raw_payload,
-                complete=True
+                complete=True,
+                has_payload=raw_payload is not None
             )
 
         self.__raw_payload_cache: SerializableType | None = None
@@ -1938,7 +2161,12 @@ class GNResponse(Exception):
         else:
             cookies = None
 
-        payload = self._tdo.serialize() if self._tdo is not None else self._payload_state.currentPayload
+        if self._tdo is not None:
+            payload = self._tdo.serialize()
+        elif self.hasPayload:
+            payload = self._payload_state.currentPayload
+        else:
+            payload = None
         
         return pack_gnresponse(
             version=0,
@@ -1968,7 +2196,7 @@ class GNResponse(Exception):
         return pack_gnresponse_header(
             version=0,
             command=self._command,
-            payload_length=self.payloadSize,
+            payload_length=-1 if self.hasPayload and self.payloadSize is None else (self.payloadSize if self.hasPayload else None),
             cookies=cookies
         )
 
@@ -1992,7 +2220,8 @@ class GNResponse(Exception):
                 self._payload_state.feed(blob)
 
             self._payload_source_consumed = True
-            if total != self._payload_state.payloadSize:
+            expected = self._payload_state.payloadSize
+            if expected is not None and total != expected:
                 raise ValueError('Async payload source length does not match payloadSize')
             self._payload_state.finish(True)
         except Exception as exc:
@@ -2000,7 +2229,9 @@ class GNResponse(Exception):
             self._payload_state.fail(exc)
             raise
 
-        raw = self._payload_state.currentPayload
+        raw = await self._payload_state.get_raw_payload()
+        if raw is None:
+            return None
         self.setSerializedPayload(raw)
         return raw
 
@@ -2015,13 +2246,20 @@ class GNResponse(Exception):
         после header.
         """
         if self._payload_source is None:
-            raw = self._tdo.serialize() if self._tdo is not None else self._payload_state.currentPayload
+            if self._tdo is not None:
+                raw = self._tdo.serialize()
+            elif self.hasPayload:
+                raw = self._payload_state.currentPayload
+            else:
+                raw = None
             if raw:
                 yield raw
             return
 
         if self._payload_source_consumed:
-            raw = self._payload_state.currentPayload
+            if self._tdo is None and not self._payload_state.payloadComplete:
+                raise RuntimeError('Async payload source was already consumed')
+            raw = self._tdo.serialize() if self._tdo is not None else self._payload_state.currentPayload
             if raw:
                 yield raw
             return
@@ -2033,19 +2271,16 @@ class GNResponse(Exception):
                     raise TypeError('Async payload source must yield bytes')
                 blob = bytes(chunk)
                 total += len(blob)
-                self._payload_state.feed(blob)
                 yield blob
 
             self._payload_source_consumed = True
-            if total != self._payload_state.payloadSize:
+            expected = self._payload_state.payloadSize
+            if expected is not None and total != expected:
                 raise ValueError('Async payload source length does not match payloadSize')
-            self._payload_state.finish(True)
         except Exception as exc:
             self._payload_source_consumed = True
             self._payload_state.fail(exc)
             raise
-
-        self.setSerializedPayload(self._payload_state.currentPayload)
     
     @staticmethod
     def deserialize(data: bytes) -> 'GNResponse':
@@ -2071,7 +2306,7 @@ class GNResponse(Exception):
         )
 
     @staticmethod
-    def try_deserialize_header(data: bytes) -> Optional[Tuple['GNResponse', int, int]]:
+    def try_deserialize_header(data: bytes) -> Optional[Tuple['GNResponse', int, Optional[int]]]:
         """
         # Попытка разобрать только header ответа
 
@@ -2099,10 +2334,13 @@ class GNResponse(Exception):
         )
         response._tdo = None
         response.__raw_payload_cache = None
-        response._payload_state = _AsyncPayloadState(payload_size=int(payload_length or 0))
+        response._payload_state = _AsyncPayloadState(
+            payload_size=payload_length,
+            has_payload=bool(d.get('payload_present', False))
+        )
         response.iter = _PayloadIterProxy(response._payload_state)
 
-        return response, payload_offset, int(payload_length or 0)
+        return response, payload_offset, payload_length
 
     def setSerializedPayload(self, payload: bytes | bytearray | memoryview | None):
         """
@@ -2137,8 +2375,6 @@ class GNResponse(Exception):
         получает готовый `TempDataObject`.
         """
         self._payload_state.finish(end_stream)
-        if self._payload_state.payloadComplete:
-            self.setSerializedPayload(self._payload_state.currentPayload)
     
     @property
     def tdo(self):
@@ -2181,9 +2417,10 @@ class GNResponse(Exception):
         self._payload_source = None
         self._payload_source_consumed = False
         self._payload_state = _AsyncPayloadState(
-            payload_size=len(raw_payload or b''),
+            payload_size=len(raw_payload) if raw_payload is not None else 0,
             initial_payload=raw_payload,
-            complete=True
+            complete=True,
+            has_payload=raw_payload is not None
         )
         self.iter = _PayloadIterProxy(self._payload_state)
     
@@ -2246,7 +2483,11 @@ class GNResponse(Exception):
         self._cookies = value
 
     @property
-    def payloadSize(self) -> int:
+    def hasPayload(self) -> bool:
+        return self._payload_state.hasPayload
+
+    @property
+    def payloadSize(self) -> Optional[int]:
         """
         # Размер wire-payload ответа в байтах
 

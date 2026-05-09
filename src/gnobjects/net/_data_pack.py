@@ -195,6 +195,8 @@ def pack_gnrequest_header_v0(
     
     if version < 0 or version > 3:
         raise ValueError('Version must be between 0 and 3')
+    if payload_length is not None and payload_length < -1:
+        raise ValueError('payload_length must be >= 0, -1 for unknown, or None')
 
     blob = bytearray()
 
@@ -302,8 +304,11 @@ def pack_gnrequest_header_v0(
     b3 = 0
 
     # payload is
+    payload_length_unknown = payload_length == -1
     if payload_length is not None:
         b3 |= (1 << 7)
+        if payload_length_unknown:
+            b3 |= 1
     
     # cookies is
     if cookies is not None:
@@ -361,7 +366,7 @@ def pack_gnrequest_header_v0(
     
 
     # payload
-    if payload_length is not None:
+    if payload_length is not None and not payload_length_unknown:
         body += encode_varlen_2358(payload_length)
 
 
@@ -482,6 +487,7 @@ def unpack_gnrequest_v0(data: bytes) -> dict:
     cookies_present  = ((b3 >> 6) & 1) == 1
     url_len_flag     = (b3 >> 4) & 0b11
     cookies_len_flag = (b3 >> 2) & 0b11
+    payload_length_unknown = payload_present and ((b3 & 1) == 1)
 
     try:
         url_len_size = _len_encode_2_bit[url_len_flag]
@@ -513,12 +519,16 @@ def unpack_gnrequest_v0(data: bytes) -> dict:
     # === 9) Payload ===
     payload = None
     if payload_present:
-        p_len, p_len_size = decode_varlen_2358(data[pos:])
-        pos += p_len_size
+        if payload_length_unknown:
+            payload = data[pos:]
+            pos = total_len
+        else:
+            p_len, p_len_size = decode_varlen_2358(data[pos:])
+            pos += p_len_size
 
-        ensure(p_len)
-        payload = data[pos:pos + p_len]
-        pos += p_len
+            ensure(p_len)
+            payload = data[pos:pos + p_len]
+            pos += p_len
 
     if pos != total_len:
         raise ValueError("Trailing bytes")
@@ -532,6 +542,8 @@ def unpack_gnrequest_v0(data: bytes) -> dict:
         'url': url,
         'cookies': cookies,
         'payload': payload,
+        'payload_present': payload_present,
+        'payload_length': None if payload_length_unknown else (len(payload) if payload is not None else 0),
     }
 
 
@@ -644,6 +656,7 @@ def unpack_gnrequest_header_v0(data: bytes) -> Tuple[dict, int]:
     cookies_present = ((b3 >> 6) & 1) == 1
     url_len_flag = (b3 >> 4) & 0b11
     cookies_len_flag = (b3 >> 2) & 0b11
+    payload_length_unknown = payload_present and ((b3 & 1) == 1)
 
     try:
         url_len_size = _len_encode_2_bit[url_len_flag]
@@ -670,11 +683,14 @@ def unpack_gnrequest_header_v0(data: bytes) -> Tuple[dict, int]:
         cookies = data[pos:pos + c_len]
         pos += c_len
 
-    payload_length = 0
+    payload_length: Optional[int] = 0
     if payload_present:
-        p_len, p_len_size = decode_varlen_2358(data[pos:])
-        payload_length = p_len
-        pos += p_len_size
+        if payload_length_unknown:
+            payload_length = None
+        else:
+            p_len, p_len_size = decode_varlen_2358(data[pos:])
+            payload_length = p_len
+            pos += p_len_size
 
     return {
         'version': version,
@@ -1490,7 +1506,7 @@ def pack_gnresponse_header_v0(
     def _check_size(x: Optional[int], name: str) -> None:
         if x is None:
             return
-        if x < 0 or x >= (1 << 62):
+        if x < -1 or x >= (1 << 62):
             raise ValueError(f"{name} too large (>= 2^62)")
 
     _check_len(cookies, "cookies")
@@ -1502,10 +1518,13 @@ def pack_gnresponse_header_v0(
 
     has_cookies = cookies is not None
     has_payload = payload_length is not None
+    payload_length_unknown = payload_length == -1
     if has_cookies:
         b0 |= (1 << 3)
     if has_payload:
         b0 |= (1 << 2)
+        if payload_length_unknown:
+            b0 |= 1
 
     if isinstance(command, bool):
         b0 |= (0b00 << 4)
@@ -1568,7 +1587,7 @@ def pack_gnresponse_header_v0(
         out.extend(__encode_varint62(len(cookies)))  # type: ignore[arg-type]
         out.extend(cookies)  # type: ignore[arg-type]
 
-    if has_payload:
+    if has_payload and not payload_length_unknown:
         out.extend(__encode_varint62(payload_length))  # type: ignore[arg-type]
 
     return bytes(out)
@@ -1599,9 +1618,17 @@ def unpack_gnresponse_v0(buf: bytes) -> dict:
     # Биты флагов перекрываются nibble в микро-кадрах/расш.-без-cp — учитываем это ниже.
     has_cookies_bit = bool((b0 >> 3) & 1)
     has_payload_bit = bool((b0 >> 2) & 1)
+    payload_length_unknown = has_payload_bit and bool(b0 & 1)
     nibble = b0 & 0x0F
 
-    res: dict[str, Any] = {"version": version, "command_type": ctype, "cookies": None, "payload": None}
+    res: dict[str, Any] = {
+        "version": version,
+        "command_type": ctype,
+        "cookies": None,
+        "payload": None,
+        "payload_present": has_payload_bit,
+        "payload_length": None,
+    }
 
     if ctype == 0b00:  # bool
         res["command"] = bool((b0 >> 1) & 1)
@@ -1670,12 +1697,18 @@ def unpack_gnresponse_v0(buf: bytes) -> dict:
             pos = end
 
         if has_payload_bit:
-            ln, pos = __decode_varint62(buf, pos)
-            end = pos + ln
-            if end > len(buf):
-                raise ValueError("Payload truncated")
-            res["payload"] = bytes(buf[pos:end])
-            pos = end
+            if payload_length_unknown:
+                res["payload"] = bytes(buf[pos:])
+                res["payload_length"] = None
+                pos = len(buf)
+            else:
+                ln, pos = __decode_varint62(buf, pos)
+                end = pos + ln
+                if end > len(buf):
+                    raise ValueError("Payload truncated")
+                res["payload"] = bytes(buf[pos:end])
+                res["payload_length"] = ln
+                pos = end
 
     if pos != len(buf):
         raise ValueError("Trailing bytes")
@@ -1713,9 +1746,17 @@ def unpack_gnresponse_header_v0(buf: bytes) -> Tuple[dict, int, Optional[int]]:
     ctype = (b0 >> 4) & 0b11
     has_cookies = bool((b0 >> 3) & 1)
     has_payload = bool((b0 >> 2) & 1)
+    payload_length_unknown = has_payload and bool(b0 & 1)
     nibble = b0 & 0x0F
 
-    res: dict[str, Any] = {"version": version, "command_type": ctype, "cookies": None, "payload": None}
+    res: dict[str, Any] = {
+        "version": version,
+        "command_type": ctype,
+        "cookies": None,
+        "payload": None,
+        "payload_present": has_payload,
+        "payload_length": None,
+    }
 
     inline_command = (not has_cookies) and (not has_payload) and nibble != 0x0F
 
@@ -1761,7 +1802,11 @@ def unpack_gnresponse_header_v0(buf: bytes) -> Tuple[dict, int, Optional[int]]:
 
     payload_length: Optional[int] = None
     if has_payload:
-        payload_length, pos = decode_varint(pos)
+        if payload_length_unknown:
+            payload_length = None
+        else:
+            payload_length, pos = decode_varint(pos)
+        res["payload_length"] = payload_length
 
     return res, pos, payload_length
 # ===== GNResponse =====
@@ -1841,11 +1886,23 @@ class _Aracada_container_packer:
         
         try:
             return _Aracada_container_packer._dc.decompress(data)
-        except zstd.ZstdError as e:
-            raise ValueError(f"Decompression failed: {e}")
+        except zstd.ZstdError as first_error:
+            try:
+                decompressor = zstd.ZstdDecompressor().decompressobj()
+                payload = decompressor.decompress(data)
+                payload += decompressor.flush()
+                if not decompressor.eof:
+                    raise ValueError('Compressed payload ended before zstd frame was complete')
+                return payload
+            except Exception as e:
+                raise ValueError(f"Decompression failed: {first_error}; streaming fallback failed: {e}") from e
 
     @staticmethod
-    def encode_itp(data: bytes, interpretatorType: Union[int, str], interpretatorVersion: int = 0, compression_info: Optional[Tuple[int, int, int, int]] = None) -> bytes:
+    def encode_itp_header(
+        interpretatorType: Union[int, str],
+        interpretatorVersion: int = 0,
+        compression_info: Optional[Tuple[int, int, int, int]] = None
+    ) -> tuple[bytes, Tuple[int, int, int, int]]:
         head = bytearray()
         head.extend((1).to_bytes(2, "big"))  # container type: itp
 
@@ -1872,11 +1929,20 @@ class _Aracada_container_packer:
         compression_support = common_inTypes_compression_support.get(interpretatorType, (0, 0, 0, 0)) if compression_info is None else compression_info # type: ignore
         if compression_support is not None:
             head.extend(bytes([pack_byte_1_1_4_2(*compression_support)]))  # compression support info
-            payload = _Aracada_container_packer._compress_object(data, *compression_support)
         else:
             head.extend(bytes([0]))  # no compression support info
-            payload = data
-        return bytes(head) + payload
+            compression_support = (0, 0, 0, 0)
+        return bytes(head), compression_support
+
+    @staticmethod
+    def encode_itp(data: bytes, interpretatorType: Union[int, str], interpretatorVersion: int = 0, compression_info: Optional[Tuple[int, int, int, int]] = None) -> bytes:
+        head, compression_support = _Aracada_container_packer.encode_itp_header(
+            interpretatorType,
+            interpretatorVersion,
+            compression_info
+        )
+        payload = _Aracada_container_packer._compress_object(data, *compression_support)
+        return head + payload
     
     @staticmethod
     def decode_itp(data: bytes) -> tuple[int | str, int, bytes, tuple[int, int, int, int]] | None:

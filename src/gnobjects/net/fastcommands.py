@@ -2,7 +2,7 @@ from typing import Optional, Union, List
 
 from KeyisBTools.models.serialization import SerializableType
 
-from .objects import GNResponse, FileObject, CORSObject, TempDataGroup, TempDataObject
+from .objects import GNResponse, FileObject, TempDataGroup, TempDataObject
 
 COMMAND_TREE: dict[tuple[str, ...], Union[str, int, bool]] = {}
 # path-prefix -> set(full_paths)
