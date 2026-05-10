@@ -583,6 +583,7 @@ class TempDataGroup:
 
 
 _PAYLOAD_NOT_READY = object()
+_DEFAULT_ITER_PAYLOAD_CHUNK_SIZE = 1024 * 1024
 
 
 class _AsyncPayloadState:
@@ -1627,7 +1628,7 @@ class GNRequest:
         self.setSerializedPayload(raw)
         return raw
 
-    async def iterSerializedPayload(self) -> AsyncGenerator[bytes, None]:
+    async def iterSerializedPayload(self, chunk_size: int = _DEFAULT_ITER_PAYLOAD_CHUNK_SIZE) -> AsyncGenerator[bytes, None]:
         """
         # Потоковая выдача сериализованного payload
 
@@ -1645,11 +1646,26 @@ class GNRequest:
         Если payload задан как `AsyncIterable[bytes]`, генератор будет отдавать чанки по мере
         их поступления из этого источника.
         """
+        if chunk_size <= 0:
+            raise ValueError('chunk_size must be > 0')
+
         if self._payload_source is None:
             if self._tdo is not None:
                 raw = self._tdo.serialize()
             elif self.hasPayload:
-                raw = self._payload_state._materialize_complete_payload()
+                if self._payload_state.payloadComplete:
+                    raw = self._payload_state._materialize_complete_payload()
+                else:
+                    async for chunk in self._payload_state.iter_bytes(
+                        chunk_size,
+                        require_container_header=False,
+                        payload_only=False
+                    ):
+                        if chunk is None:
+                            raise RuntimeError('Incoming request payload ended before it could be forwarded')
+                        if chunk:
+                            yield chunk
+                    return
             else:
                 raw = None
             if raw:
@@ -2229,7 +2245,7 @@ class GNResponse(Exception):
         self.setSerializedPayload(raw)
         return raw
 
-    async def iterSerializedPayload(self) -> AsyncGenerator[bytes, None]:
+    async def iterSerializedPayload(self, chunk_size: int = _DEFAULT_ITER_PAYLOAD_CHUNK_SIZE) -> AsyncGenerator[bytes, None]:
         """
         # Потоковая выдача сериализованного payload ответа
 
@@ -2239,11 +2255,26 @@ class GNResponse(Exception):
         Header `GNResponse` сюда не входит. Только payload, который должен быть отправлен
         после header.
         """
+        if chunk_size <= 0:
+            raise ValueError('chunk_size must be > 0')
+
         if self._payload_source is None:
             if self._tdo is not None:
                 raw = self._tdo.serialize()
             elif self.hasPayload:
-                raw = self._payload_state._materialize_complete_payload()
+                if self._payload_state.payloadComplete:
+                    raw = self._payload_state._materialize_complete_payload()
+                else:
+                    async for chunk in self._payload_state.iter_bytes(
+                        chunk_size,
+                        require_container_header=False,
+                        payload_only=False
+                    ):
+                        if chunk is None:
+                            raise RuntimeError('Incoming response payload ended before it could be forwarded')
+                        if chunk:
+                            yield chunk
+                    return
             else:
                 raw = None
             if raw:
