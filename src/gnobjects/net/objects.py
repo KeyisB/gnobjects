@@ -385,11 +385,7 @@ class FileObject:
         if alg != 0:
             raise NotImplementedError(f"Unknown compression algorithm code: {alg}")
 
-        compressor = _Aracada_container_packer._cctx_dict.get(level)
-        if compressor is None:
-            raise ValueError(f"Unknown compression level code: {level}. Supported levels: 0-3")
-
-        cobj = compressor.compressobj()
+        cobj = _Aracada_container_packer._new_zstd_compressor(level).compressobj()
         async for chunk in self._iter_data(chunk_size):
             out = cobj.compress(chunk)
             if out:

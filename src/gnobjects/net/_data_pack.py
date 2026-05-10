@@ -1845,13 +1845,27 @@ container type:
 _Mode = Union[Literal['itp'], str]
 
 class _Aracada_container_packer:
-    _cctx_dict = {
-        0: zstd.ZstdCompressor(level=1),
-        1: zstd.ZstdCompressor(level=6),
-        2: zstd.ZstdCompressor(level=9),
-        3: zstd.ZstdCompressor(level=19)
+    _zstd_levels = {
+        0: 1,
+        1: 6,
+        2: 9,
+        3: 19
     }
-    _dc = zstd.ZstdDecompressor()
+
+    @staticmethod
+    def _zstd_level(level_code: int) -> int:
+        level = _Aracada_container_packer._zstd_levels.get(level_code)
+        if level is None:
+            raise ValueError(f"Unknown compression level code: {level_code}. Supported levels: 0-3")
+        return level
+
+    @staticmethod
+    def _new_zstd_compressor(level_code: int) -> zstd.ZstdCompressor:
+        return zstd.ZstdCompressor(level=_Aracada_container_packer._zstd_level(level_code))
+
+    @staticmethod
+    def _new_zstd_decompressor() -> zstd.ZstdDecompressor:
+        return zstd.ZstdDecompressor()
 
 
     @staticmethod
@@ -1865,12 +1879,8 @@ class _Aracada_container_packer:
         if alg != 0:
             raise NotImplementedError(f"Unknown compression algorithm code: {alg}")
         
-        c = _Aracada_container_packer._cctx_dict.get(l)
-
-        if c is None:
-            raise ValueError(f"Unknown compression level code: {l}. Supported levels: 0-3")
-        
-        return c.compress(data)
+        compressor = _Aracada_container_packer._new_zstd_compressor(l)
+        return compressor.compress(data)
         
     @staticmethod
     def _decompress_object(data: bytes, on: int, use_map: int, alg: int, l: int):
@@ -1885,10 +1895,10 @@ class _Aracada_container_packer:
         
         
         try:
-            return _Aracada_container_packer._dc.decompress(data)
+            return _Aracada_container_packer._new_zstd_decompressor().decompress(data)
         except zstd.ZstdError as first_error:
             try:
-                decompressor = zstd.ZstdDecompressor().decompressobj()
+                decompressor = _Aracada_container_packer._new_zstd_decompressor().decompressobj()
                 payload = decompressor.decompress(data)
                 payload += decompressor.flush()
                 if not decompressor.eof:
