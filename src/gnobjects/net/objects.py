@@ -1812,7 +1812,7 @@ class GNRequest:
         d: str = self.client._data['domain']
 
         ct = None
-        if d.endswith(('.origin.shield.gn', '~origin.shield.gn')):
+        if d.endswith(('.origin.shield.gn', '~origin.shield.gn')) and self._cookies and self._cookies.get('gn', {}).get('net', {}).get('gn', False):
             ct = 1
         elif d.endswith('~gwis'):
             ct = 4
