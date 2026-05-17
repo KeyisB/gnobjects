@@ -10,7 +10,10 @@ tablex_gwis_object_types_int_to_str: dict[int, str] = {
     9: 'region',
     255: 'freenet' # access from web2
 }
-gwis_object_types_int_object_id_start: int = 100_001
+
+gwis_object_types_int_object_id_start: int = 100_000
+gwis_object_types_int_object_id_end: int = 281_474_976_710_656
+
 table_gwis_object_types_int_max_object_id: dict[int, int] = {
     8: 2 ** 16,
     9: 2 ** 32

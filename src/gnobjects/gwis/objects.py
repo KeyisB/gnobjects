@@ -35,3 +35,7 @@ class GWISObject:
 
         self.__object_id = object_id
         return object_id
+    
+    @staticmethod
+    def fromObjectID(object_id: int, type: int):
+        return GWISObject(object_id + table_gwis_object_types_int_ranges[type][0], type)
