@@ -4,6 +4,7 @@ from typing import *
 
 import zstandard as zstd
 
+from KeyisBTools.models import serialization as _serialization
 from KeyisBTools.models.serialization import SerializableType, serialize, deserialize
 
 
@@ -77,13 +78,95 @@ def decode_varlen_2358_2(buf: bytes, pos: int) -> Tuple[int, int]:
     return length, pos + nbytes
 
 
-_rev_dataTypes: Dict[int, str] = {v: k for k, v in common_gnrequest_dataTypes.items()}
-_rev_inTypes:   Dict[int, str] = {v: k for k, v in common_inTypes.items()}
-_rev_methods:   Dict[int, str] = {v: k for k, v in common_gnrequest_methods.items()}
+_rev_dataTypes: dict[int, str] = {v: k for k, v in common_gnrequest_dataTypes.items()}
+_rev_inTypes:   dict[int, str] = {v: k for k, v in common_inTypes.items()}
+_rev_methods:   dict[int, str] = {v: k for k, v in common_gnrequest_methods.items()}
 
 
 class IncompleteGNFrameError(ValueError):
     pass
+
+
+VFSD_CONTAINER_TYPE = 3
+VFSDFrame = tuple[int, str, bytes, int, bytes | None]
+
+
+def _decode_varlen_1248_at(buf: bytes, pos: int) -> Tuple[int, int]:
+    if pos >= len(buf):
+        raise IncompleteGNFrameError("Buffer underflow (no varlen head)")
+    tag = buf[pos] >> 6
+    size = (1, 2, 4, 8)[tag]
+    end = pos + size
+    if end > len(buf):
+        raise IncompleteGNFrameError("Buffer underflow (varlen truncated)")
+    value, _ = decode_varlen_1248(buf[pos:end])
+    return value, end
+
+
+def _require_vfsd_uint(value: int, name: str, max_value: int = (1 << 62) - 1) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError(f"{name} must be int")
+    if value < 0 or value > max_value:
+        raise ValueError(f"{name} must be in range [0..{max_value}]")
+    return value
+
+
+def _normalize_vfsd_frame(frame: Any) -> VFSDFrame:
+    if not isinstance(frame, (list, tuple)) or len(frame) != 5:
+        raise ValueError("VFSD frame must be a tuple/list of 5 items")
+
+    object_type, name, abs_id, updated_ns, payload = frame
+    object_type = _require_vfsd_uint(object_type, "frame type", 0xFFFF)
+    if not isinstance(name, str):
+        raise TypeError("frame name must be str")
+    if not isinstance(abs_id, (bytes, bytearray, memoryview)):
+        raise TypeError("frame abs_id must be bytes(32)")
+    abs_id_bytes = bytes(abs_id)
+    if len(abs_id_bytes) != 32:
+        raise ValueError("frame abs_id must be bytes(32)")
+    updated_ns = _require_vfsd_uint(updated_ns, "frame updated_ns")
+    if payload is not None:
+        if not isinstance(payload, (bytes, bytearray, memoryview)):
+            raise TypeError("frame payload must be bytes or None")
+        payload = bytes(payload)
+
+    return object_type, name, abs_id_bytes, updated_ns, payload
+
+
+def pack_vfsd_frame(frame: VFSDFrame) -> bytes:
+    return serialize(list(_normalize_vfsd_frame(frame)))
+
+
+def new_vfsd_msgpack_unpacker() -> Any:
+    return _serialization.msgpack.Unpacker(
+        raw=False,
+        strict_map_key=False,
+        timestamp=3,
+    )
+
+
+def iter_vfsd_payload_frames(payload: bytes | bytearray | memoryview) -> Iterator[VFSDFrame]:
+    blob = bytes(payload)
+    unpacker = new_vfsd_msgpack_unpacker()
+    unpacker.feed(blob)
+    last_frame_end = 0
+    for frame in unpacker:
+        normalized = _normalize_vfsd_frame(frame)
+        last_frame_end = unpacker.tell()
+        yield normalized
+    if last_frame_end != len(blob):
+        raise ValueError("VFSD payload has trailing incomplete msgpack frame")
+
+
+def pack_vfsd_payload(frames: Iterable[VFSDFrame]) -> bytes:
+    return b''.join(pack_vfsd_frame(frame) for frame in frames)
+
+
+def unpack_vfsd_payload(payload: bytes | bytearray | memoryview, count: Optional[int] = None) -> list[VFSDFrame]:
+    frames = list(iter_vfsd_payload_frames(payload))
+    if count is not None and len(frames) != count:
+        raise ValueError(f"VFSD payload frame count mismatch: header={count}, payload={len(frames)}")
+    return frames
 
 
 # ===== gnrequest =====
@@ -1367,6 +1450,8 @@ def unpack_temp_data_header(data: bytes) -> Tuple[dict, int]:
         return unpack_itp_header(data)
     if container_type == 2:
         return unpack_stp_header(data)
+    if container_type == VFSD_CONTAINER_TYPE:
+        return unpack_vfsd_header(data)
     raise ValueError(f"Unsupported container type: {container_type}")
 
 
@@ -1431,6 +1516,46 @@ def unpack_stp_header(data: bytes) -> Tuple[dict, int]:
     return {
         'container_type': 2,
         'interpretatorVersion': interpretator_version,
+        'compression_info': compression_info,
+    }, pos
+
+
+def unpack_vfsd_header(data: bytes) -> Tuple[dict, int]:
+    if len(data) < 2:
+        raise IncompleteGNFrameError("Data too short for VFSD header")
+
+    container_type = int.from_bytes(data[0:2], "big")
+    if container_type != VFSD_CONTAINER_TYPE:
+        raise ValueError(f"Unsupported container type: {container_type}")
+
+    pos = 2
+    version, pos = _decode_varlen_1248_at(data, pos)
+
+    if len(data) <= pos:
+        raise IncompleteGNFrameError("Data too short for VFSD compression header")
+    compression_info = unpack_byte_1_1_4_2(data[pos])
+    pos += 1
+
+    try:
+        path_b, size = decode_data_with_len(data[pos:], '1248')
+    except ValueError as exc:
+        raise IncompleteGNFrameError(str(exc)) from exc
+    pos += size
+    path = path_b.decode('utf-8')
+
+    count, pos = _decode_varlen_1248_at(data, pos)
+    created_ns, pos = _decode_varlen_1248_at(data, pos)
+    updated_ns, pos = _decode_varlen_1248_at(data, pos)
+    epoch, pos = _decode_varlen_1248_at(data, pos)
+
+    return {
+        'container_type': VFSD_CONTAINER_TYPE,
+        'version': version,
+        'path': path,
+        'count': count,
+        'created_ns': created_ns,
+        'updated_ns': updated_ns,
+        'epoch': epoch,
         'compression_info': compression_info,
     }, pos
 
@@ -2035,3 +2160,95 @@ class _Aracada_container_packer:
         payload = _Aracada_container_packer._decompress_object(payload_comp, *compression_info)
 
         return (version, payload, compression_info)
+
+    @staticmethod
+    def encode_vfsd_header(
+        path: str,
+        count: int,
+        created_ns: int,
+        updated_ns: int,
+        epoch: int,
+        version: int = 0,
+        compression_info: Optional[Tuple[int, int, int, int]] = None,
+    ) -> tuple[bytes, Tuple[int, int, int, int]]:
+        if not isinstance(path, str):
+            raise TypeError("path must be str")
+        version = _require_vfsd_uint(version, "version")
+        count = _require_vfsd_uint(count, "count")
+        created_ns = _require_vfsd_uint(created_ns, "created_ns")
+        updated_ns = _require_vfsd_uint(updated_ns, "updated_ns")
+        epoch = _require_vfsd_uint(epoch, "epoch")
+
+        head = bytearray()
+        head.extend(VFSD_CONTAINER_TYPE.to_bytes(2, "big"))
+        head.extend(encode_varlen_1248(version))
+
+        if compression_info is not None:
+            compression_support = compression_info
+            head.extend(bytes([pack_byte_1_1_4_2(*compression_support)]))
+        else:
+            compression_support = (0, 0, 0, 0)
+            head.extend(bytes([0]))
+
+        head.extend(encode_data_with_len(path.encode("utf-8"), '1248'))
+        head.extend(encode_varlen_1248(count))
+        head.extend(encode_varlen_1248(created_ns))
+        head.extend(encode_varlen_1248(updated_ns))
+        head.extend(encode_varlen_1248(epoch))
+
+        return bytes(head), compression_support
+
+    @staticmethod
+    def encode_vfsd(
+        frames: Iterable[VFSDFrame],
+        path: str,
+        created_ns: int,
+        updated_ns: int,
+        epoch: int,
+        version: int = 0,
+        compression_info: Optional[Tuple[int, int, int, int]] = None,
+    ) -> bytes:
+        frame_list = [_normalize_vfsd_frame(frame) for frame in frames]
+        head, compression_support = _Aracada_container_packer.encode_vfsd_header(
+            path,
+            len(frame_list),
+            created_ns,
+            updated_ns,
+            epoch,
+            version,
+            compression_info,
+        )
+        payload = pack_vfsd_payload(frame_list)
+        payload = _Aracada_container_packer._compress_object(payload, *compression_support)
+        return head + payload
+
+    @staticmethod
+    def decode_vfsd(data: bytes) -> tuple[int, str, int, int, int, int, list[VFSDFrame], tuple[int, int, int, int]]:
+        header, header_len = unpack_vfsd_header(data)
+        payload_comp = data[header_len:]
+        compression_info = header['compression_info']
+        payload = _Aracada_container_packer._decompress_object(payload_comp, *compression_info)
+        frames = unpack_vfsd_payload(payload, header['count'])
+
+        return (
+            header['version'],
+            header['path'],
+            header['count'],
+            header['created_ns'],
+            header['updated_ns'],
+            header['epoch'],
+            frames,
+            compression_info,
+        )
+
+    @staticmethod
+    def iter_vfsd_payload_frames(payload: bytes | bytearray | memoryview) -> Iterator[VFSDFrame]:
+        return iter_vfsd_payload_frames(payload)
+
+    @staticmethod
+    def new_vfsd_msgpack_unpacker() -> Any:
+        return new_vfsd_msgpack_unpacker()
+
+    @staticmethod
+    def normalize_vfsd_frame(frame: Any) -> VFSDFrame:
+        return _normalize_vfsd_frame(frame)

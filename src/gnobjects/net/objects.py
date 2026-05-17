@@ -4,7 +4,7 @@ import ast
 import asyncio
 import zstandard as zstd
 from collections import deque
-from typing import Optional, Dict, Any, List, Union, Literal, Tuple, cast, overload, AsyncIterable, AsyncGenerator
+from typing import Optional, Dict, Any, List, Union, Literal, Tuple, cast, overload, Iterable, Iterator, AsyncIterable, AsyncGenerator
 import anyio
 from pathlib import Path
 
@@ -23,6 +23,7 @@ from ._data_pack import (
     unpack_gnresponse_header,
     unpack_temp_data_header,
     IncompleteGNFrameError,
+    VFSDFrame,
     _Aracada_container_packer
     )
 
@@ -449,6 +450,120 @@ class ITPContainer:
         interpreterType, interpretatorVersion, payload, compression_info = r
         return ITPContainer(interpreterType, payload, interpretatorVersion, compression_info)
 
+
+class VFSDContainer:
+    __slots__ = ['version', 'path', 'count', 'created_ns', 'updated_ns', 'epoch', 'payload', 'compression_info']
+
+    def __init__(
+        self,
+        path: str,
+        payload: Iterable[VFSDFrame] | None = None,
+        version: int = 0,
+        created_ns: int = 0,
+        updated_ns: int = 0,
+        epoch: int = 0,
+        count: int | None = None,
+        compression_info: tuple[int, int, int, int] | None = None,
+    ) -> None:
+        """
+        # Контейнер VFSD (VFS Directory)
+
+        Payload состоит из последовательных msgpack-фреймов. Каждый фрейм
+        хранит tuple `(type, name, abs_id, updated_ns, payload)`.
+        """
+        if not isinstance(path, str):
+            raise TypeError('path must be str')
+
+        self.version = version
+        self.path = path
+        self.payload = [
+            _Aracada_container_packer.normalize_vfsd_frame(frame)
+            for frame in ([] if payload is None else payload)
+        ]
+        self.count = len(self.payload) if count is None else count
+        self.created_ns = created_ns
+        self.updated_ns = updated_ns
+        self.epoch = epoch
+        self.compression_info = compression_info
+
+    @property
+    def frames(self) -> list[VFSDFrame]:
+        return self.payload
+
+    def serialize(self) -> bytes:
+        if len(self.payload) != self.count:
+            raise ValueError(f'VFSD frame count mismatch: count={self.count}, payload={len(self.payload)}')
+        return _Aracada_container_packer.encode_vfsd(
+            self.payload,
+            self.path,
+            self.created_ns,
+            self.updated_ns,
+            self.epoch,
+            self.version,
+            self.compression_info,
+        )
+
+    @staticmethod
+    def deserialize(data: bytes) -> 'VFSDContainer':
+        version, path, count, created_ns, updated_ns, epoch, payload, compression_info = _Aracada_container_packer.decode_vfsd(data)
+        return VFSDContainer(path, payload, version, created_ns, updated_ns, epoch, count, compression_info)
+
+    @staticmethod
+    def iterFramesFromPayload(payload: bytes | bytearray | memoryview, count: Optional[int] = None) -> Iterator[VFSDFrame]:
+        emitted = 0
+        for frame in _Aracada_container_packer.iter_vfsd_payload_frames(payload):
+            emitted += 1
+            yield frame
+        if count is not None and emitted != count:
+            raise ValueError(f'VFSD frame payload count mismatch: header={count}, payload={emitted}')
+
+    @staticmethod
+    def iterFramesFromChunks(chunks: Iterable[bytes | bytearray | memoryview], count: Optional[int] = None) -> Iterator[VFSDFrame]:
+        unpacker = _Aracada_container_packer.new_vfsd_msgpack_unpacker()
+        emitted = 0
+        total = 0
+        last_frame_end = 0
+        for chunk in chunks:
+            blob = bytes(chunk)
+            if not blob:
+                continue
+            total += len(blob)
+            unpacker.feed(blob)
+            for frame in unpacker:
+                normalized = _Aracada_container_packer.normalize_vfsd_frame(frame)
+                last_frame_end = unpacker.tell()
+                emitted += 1
+                yield normalized
+        if last_frame_end != total:
+            raise ValueError('VFSD frame stream has trailing incomplete msgpack frame')
+        if count is not None and emitted != count:
+            raise ValueError(f'VFSD frame stream count mismatch: header={count}, payload={emitted}')
+
+    @staticmethod
+    async def aiterFramesFromChunks(chunks: AsyncIterable[bytes | bytearray | memoryview | None], count: Optional[int] = None) -> AsyncGenerator[VFSDFrame, None]:
+        unpacker = _Aracada_container_packer.new_vfsd_msgpack_unpacker()
+        emitted = 0
+        total = 0
+        last_frame_end = 0
+        async for chunk in chunks:
+            if chunk is None:
+                raise ValueError('VFSD frame stream ended before payload was complete')
+            blob = bytes(chunk)
+            if not blob:
+                continue
+            total += len(blob)
+            unpacker.feed(blob)
+            for frame in unpacker:
+                normalized = _Aracada_container_packer.normalize_vfsd_frame(frame)
+                last_frame_end = unpacker.tell()
+                emitted += 1
+                yield normalized
+        if last_frame_end != total:
+            raise ValueError('VFSD frame stream has trailing incomplete msgpack frame')
+        if count is not None and emitted != count:
+            raise ValueError(f'VFSD frame stream count mismatch: header={count}, payload={emitted}')
+
+
 class TempDataObject:
     __slots__ = ['_container']
 
@@ -469,7 +584,7 @@ class TempDataObject:
 
     @overload
     def __init__(self,
-                container: STPContainer | ITPContainer | bytes | None = None
+                container: STPContainer | ITPContainer | VFSDContainer | bytes | None = None
     ) -> None:
         """
         # Временный объект данных
@@ -500,7 +615,7 @@ class TempDataObject:
                 interpretatorVersion = 0
             self._container = ITPContainer(interpreterType, payload, interpretatorVersion, compression_info)
 
-    def setContainer(self, container: STPContainer | ITPContainer | bytes):
+    def setContainer(self, container: STPContainer | ITPContainer | VFSDContainer | bytes):
         if isinstance(container, (bytearray, memoryview)):
             container = bytes(container)
         self._container = container
@@ -519,7 +634,7 @@ class TempDataObject:
         return self._container.serialize()
     
     @property
-    def container(self) -> STPContainer | ITPContainer | None:
+    def container(self) -> STPContainer | ITPContainer | VFSDContainer | None:
         """
         # Контейнер данных
 
@@ -542,7 +657,7 @@ class TempDataObject:
 
         return tdo
     
-    def _unpack_container(self) -> STPContainer | ITPContainer:
+    def _unpack_container(self) -> STPContainer | ITPContainer | VFSDContainer:
         if self._container is None:
             raise ValueError('TempDataObject container is None')
         
@@ -553,6 +668,8 @@ class TempDataObject:
                 self._container = ITPContainer.deserialize(self._container)
             elif t == 2:  # STP
                 self._container = STPContainer.deserialize(self._container)
+            elif t == 3:  # VFSD
+                self._container = VFSDContainer.deserialize(self._container)
             else:
                 raise ValueError('Invalid TempDataObject data')
         
@@ -565,6 +682,19 @@ class TempDataObject:
     @staticmethod
     def ITP(interpreterType: int | str, payload: bytes, interpretatorVersion: int = 0, compression_info: tuple[int, int, int, int] | None = None) -> 'TempDataObject':
         return TempDataObject(ITPContainer(interpreterType, payload, interpretatorVersion, compression_info))
+
+    @staticmethod
+    def VFSD(
+        path: str,
+        payload: Optional[Iterable[VFSDFrame]] = None,
+        version: int = 0,
+        created_ns: int = 0,
+        updated_ns: int = 0,
+        epoch: int = 0,
+        count: Optional[int] = None,
+        compression_info: tuple[int, int, int, int] | None = None,
+    ) -> 'TempDataObject':
+        return TempDataObject(VFSDContainer(path, payload, version, created_ns, updated_ns, epoch, count, compression_info))
     
     def __repr__(self) -> str:
         return "<TempDataObject>"
@@ -610,7 +740,7 @@ class _AsyncPayloadState:
         self._payload_complete = False
         self._payload_incomplete = False
         self._waiters: list[asyncio.Future[None]] = []
-        self._container_header: object | STPContainer | ITPContainer | None = _PAYLOAD_NOT_READY
+        self._container_header: object | STPContainer | ITPContainer | VFSDContainer | None = _PAYLOAD_NOT_READY
         self._container_header_len: Optional[int] = None
         self._container_waiters: list[asyncio.Future[None]] = []
         self._failure: Optional[Exception] = None
@@ -752,7 +882,7 @@ class _AsyncPayloadState:
             break
 
         if header['container_type'] == 1:
-            container: STPContainer | ITPContainer = ITPContainer(
+            container: STPContainer | ITPContainer | VFSDContainer = ITPContainer(
                 header['interpreterType'],
                 b'',
                 header['interpretatorVersion'],
@@ -760,6 +890,17 @@ class _AsyncPayloadState:
             )
         elif header['container_type'] == 2:
             container = STPContainer(b'', header['interpretatorVersion'], header['compression_info'])
+        elif header['container_type'] == 3:
+            container = VFSDContainer(
+                header['path'],
+                [],
+                header['version'],
+                header['created_ns'],
+                header['updated_ns'],
+                header['epoch'],
+                header['count'],
+                header['compression_info'],
+            )
         else:
             self._failure = ValueError(f"Unsupported container type: {header['container_type']}")
             return
@@ -850,11 +991,11 @@ class _AsyncPayloadState:
                 return None
             await self._wait_for_completion()
 
-    async def get_container_header(self) -> Optional[STPContainer | ITPContainer]:
+    async def get_container_header(self) -> Optional[STPContainer | ITPContainer | VFSDContainer]:
         while True:
             self._raise_failure()
             if self._container_header is not _PAYLOAD_NOT_READY:
-                return cast(Optional[STPContainer | ITPContainer], self._container_header)
+                return cast(Optional[STPContainer | ITPContainer | VFSDContainer], self._container_header)
             if self._consumer == 'stream' and self._consumed:
                 raise RuntimeError('Payload stream has already been consumed; container header is no longer available')
             if self._payload_incomplete:
