@@ -1,10 +1,12 @@
-from typing import Any, Callable, Mapping, TypeAlias, TypeVar, overload
+from typing import Any, Callable, ClassVar, Generic, Mapping, TypeAlias, TypeVar, overload
+from typing_extensions import Self
 from typing_extensions import dataclass_transform
 from _typeshed import DataclassInstance as _DataclassInstance
 from pydantic import BaseModel as _PydanticBaseModel
 
 
 _T = TypeVar("_T")
+_ModelT = TypeVar("_ModelT")
 
 MODEL_SCHEMA_KIND_UNKNOWN: int
 MODEL_SCHEMA_KIND_GN_DATAMODEL: int
@@ -14,30 +16,17 @@ MODEL_SCHEMA_KIND_PYDANTIC_TYPEADAPTER: int
 MODEL_SCHEMA_KIND_NAMES: dict[int, str]
 
 
-class _ModelAccessor:
+class _ModelAccessor(Generic[_ModelT]):
     def dump(self) -> dict[str, Any]: ...
     def toDict(self) -> dict[str, Any]: ...
-    def fromDict(self, obj: Any, **kwargs: Any) -> Any: ...
-    def dump_json(self, **kwargs: Any) -> str: ...
-    def copy(self, *, update: dict[str, Any] | None = None, deep: bool = False) -> Any: ...
+    def fromDict(self, obj: Any, **kwargs: Any) -> _ModelT: ...
+    def copy(self, *, update: dict[str, Any] | None = None, deep: bool = False) -> _ModelT: ...
 
     @property
     def fields_set(self) -> set[str]: ...
 
     @staticmethod
     def validate(model_class: type[_T], obj: Any, **kwargs: Any) -> _T: ...
-
-    @staticmethod
-    def validate_json(model_class: type[_T], json_data: str | bytes | bytearray, **kwargs: Any) -> _T: ...
-
-    @staticmethod
-    def validate_strings(model_class: type[_T], obj: Any, **kwargs: Any) -> _T: ...
-
-    @staticmethod
-    def schema(model_class: type, **kwargs: Any) -> dict[str, Any]: ...
-
-    @staticmethod
-    def rebuild(model_class: type, **kwargs: Any) -> bool | None: ...
 
     @staticmethod
     def fields(model_class: type) -> Any: ...
@@ -161,9 +150,6 @@ def Field(
 ) -> Any: ...
 
 
-ModelPayload: TypeAlias = _PydanticBaseModel | _DataclassInstance
-
-
 @overload
 @dataclass_transform(kw_only_default=False, field_specifiers=(Field,))
 def dataclass(_cls: type[_T], **kwargs: Any) -> type[_T]: ...
@@ -174,24 +160,12 @@ def dataclass(_cls: type[_T], **kwargs: Any) -> type[_T]: ...
 def dataclass(_cls: None = None, **kwargs: Any) -> Callable[[type[_T]], type[_T]]: ...
 
 
-@overload
 @dataclass_transform(kw_only_default=False, field_specifiers=(Field,))
-def DataModel(_cls: type[_T], **kwargs: Any) -> type[_T]: ...
+class DataModel:
+    model: ClassVar[_ModelAccessor[Self]]
 
 
-@overload
-@dataclass_transform(kw_only_default=False, field_specifiers=(Field,))
-def DataModel(_cls: None = None, **kwargs: Any) -> Callable[[type[_T]], type[_T]]: ...
-
-
-@overload
-@dataclass_transform(kw_only_default=False, field_specifiers=(Field,))
-def BaseModel(_cls: type[_T], **kwargs: Any) -> type[_T]: ...
-
-
-@overload
-@dataclass_transform(kw_only_default=False, field_specifiers=(Field,))
-def BaseModel(_cls: None = None, **kwargs: Any) -> Callable[[type[_T]], type[_T]]: ...
+ModelPayload: TypeAlias = _PydanticBaseModel | DataModel | _DataclassInstance
 
 
 def is_data_model_type(value: Any) -> bool: ...

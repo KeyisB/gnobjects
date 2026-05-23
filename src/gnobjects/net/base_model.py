@@ -21,6 +21,8 @@ else:
 
 _T = TypeVar("_T")
 _DATA_MODEL_ATTR = "__gn_data_model__"
+_MODEL_SCHEMA_KIND_ATTR = "__gn_model_schema_kind__"
+_MODEL_SCHEMA_NAME_ATTR = "__gn_model_schema_name__"
 _FIELD_METADATA_KEY = "gn_data_model_field"
 
 MODEL_SCHEMA_KIND_UNKNOWN = 0
@@ -249,7 +251,7 @@ class _ModelAccessor:
         return self._model_class
 
     def dump(self) -> dict[str, Any]:
-        return model_dump(self._require_instance())
+        return model_validate_dump(self._require_instance())
 
     def toDict(self) -> dict[str, Any]:
         return self.dump()
@@ -257,19 +259,14 @@ class _ModelAccessor:
     def fromDict(self, obj: Any, **kwargs: Any) -> Any:
         return model_validate(self._require_model_class(), obj, **kwargs)
 
-    def dump_json(self, **kwargs: Any) -> str:
-        inst = self._require_instance()
-        data = _adapter_for(type(inst)).dump_json(inst, **kwargs)
-        return data.decode("utf-8")
-
     def copy(self, *, update: dict[str, Any] | None = None, deep: bool = False) -> Any:
         inst = self._require_instance()
-        data = model_dump(inst)
+        data = model_validate_dump(inst)
         if deep:
             data = _copy.deepcopy(data)
         if update:
             data.update(update)
-        return type(inst)(**data)
+        return model_validate(type(inst), data)
 
     @property
     def fields_set(self) -> set[str]:
@@ -281,23 +278,6 @@ class _ModelAccessor:
     @staticmethod
     def validate(model_class: type[_T], obj: Any, **kwargs: Any) -> _T:
         return model_validate(model_class, obj, **kwargs)
-
-    @staticmethod
-    def validate_json(model_class: type[_T], json_data: str | bytes | bytearray, **kwargs: Any) -> _T:
-        return _adapter_for(model_class).validate_json(json_data, **kwargs)
-
-    @staticmethod
-    def validate_strings(model_class: type[_T], obj: Any, **kwargs: Any) -> _T:
-        return _adapter_for(model_class).validate_strings(obj, **kwargs)
-
-    @staticmethod
-    def schema(model_class: type, **kwargs: Any) -> dict[str, Any]:
-        return _adapter_for(model_class).json_schema(**kwargs)
-
-    @staticmethod
-    def rebuild(model_class: type, **kwargs: Any) -> bool | None:
-        rebuild = getattr(_adapter_for(model_class), "rebuild", None)
-        return rebuild(**kwargs) if callable(rebuild) else None
 
     @staticmethod
     def fields(model_class: type) -> Any:
@@ -325,9 +305,6 @@ class _ModelAccessorDescriptor:
         return _ModelAccessor(inst, owner if owner is not None else type(inst))
 
 
-ModelPayload: TypeAlias = _PydanticBaseModel | _DataclassInstance
-
-
 def _attach_model_accessor(model_class: type[_T]) -> type[_T]:
     if "model" not in getattr(model_class, "__dataclass_fields__", {}):
         setattr(model_class, "model", _ModelAccessorDescriptor())
@@ -353,28 +330,89 @@ def dataclass(_cls: type[_T] | None = None, **kwargs: Any):
     return wrap(_cls)
 
 
-@overload
-def DataModel(_cls: type[_T], **kwargs: Any) -> type[_T]: ...
+_DATA_MODEL_DATACLASS_KWARGS = frozenset((
+    "init",
+    "repr",
+    "eq",
+    "order",
+    "unsafe_hash",
+    "frozen",
+    "match_args",
+    "kw_only",
+    "slots",
+    "weakref_slot",
+))
 
 
-@overload
-def DataModel(_cls: None = None, **kwargs: Any) -> Callable[[type[_T]], type[_T]]: ...
+class _DataModelMeta(type):
+    def __new__(
+        mcls,
+        name: str,
+        bases: tuple[type, ...],
+        namespace: dict[str, Any],
+        **kwargs: Any,
+    ) -> type:
+        cls = super().__new__(mcls, name, bases, namespace)
+        if not any(isinstance(base, _DataModelMeta) for base in bases):
+            return cls
 
+        if "__dataclass_fields__" in namespace:
+            setattr(cls, _DATA_MODEL_ATTR, True)
+            return cls
 
-def DataModel(_cls: type[_T] | None = None, **kwargs: Any):
-    kwargs.setdefault("slots", True)
+        _validate_data_model_namespace(name, bases, namespace, kwargs)
 
-    def wrap(cls: type[_T]) -> type[_T]:
-        model_class = _attach_model_accessor(_stdlib_dataclass(cls, **kwargs))
+        dataclass_kwargs = dict(kwargs)
+        dataclass_kwargs["slots"] = True
+        model_class = _stdlib_dataclass(cls, **dataclass_kwargs)
         setattr(model_class, _DATA_MODEL_ATTR, True)
+        _warm_data_model_class(model_class)
         return model_class
 
-    if _cls is None:
-        return wrap
-    return wrap(_cls)
+
+class DataModel(metaclass=_DataModelMeta):
+    __slots__ = ()
+    model = _ModelAccessorDescriptor()
 
 
-BaseModel = dataclass
+ModelPayload: TypeAlias = _PydanticBaseModel | DataModel | _DataclassInstance
+
+
+def _validate_data_model_namespace(
+    name: str,
+    bases: tuple[type, ...],
+    namespace: dict[str, Any],
+    kwargs: dict[str, Any],
+) -> None:
+    unknown = tuple(key for key in kwargs if key not in _DATA_MODEL_DATACLASS_KWARGS)
+    if unknown:
+        raise TypeError(f"{name} got unsupported DataModel option(s): {', '.join(unknown)}")
+    if kwargs.get("slots", True) is not True:
+        raise TypeError(f"{name} must use slots=True")
+    if "__slots__" in namespace:
+        raise TypeError(f"{name} must not define __slots__; DataModel always uses slots=True")
+    if len(bases) != 1:
+        raise TypeError(f"{name} supports only single DataModel inheritance")
+    annotations = namespace.get("__annotations__", {})
+    if "model" in namespace or "model" in annotations:
+        raise TypeError(f"{name}.model is reserved for DataModel helpers")
+
+
+def _warm_data_model_class(model_class: type) -> None:
+    setattr(model_class, _MODEL_SCHEMA_KIND_ATTR, MODEL_SCHEMA_KIND_GN_DATAMODEL)
+    setattr(model_class, _MODEL_SCHEMA_NAME_ATTR, _model_schema_name_for(model_class))
+    fields_for = globals().get("_data_model_fields_for")
+    if fields_for is not None:
+        try:
+            fields_for(model_class)
+        except Exception:
+            # Best-effort warm-up only. At class-creation time the class name is
+            # not yet bound in its module, so self/forward references cannot be
+            # resolved by get_type_hints yet. lru_cache does not store failures,
+            # so the field set (and its validators) is compiled lazily on first
+            # use, once the references resolve. Validation must never be silently
+            # degraded here.
+            pass
 
 
 def is_data_model_type(value: Any) -> bool:
@@ -425,6 +463,14 @@ def model_kind(value: Any) -> str:
 
 def model_schema_kind(value: Any) -> int:
     model_type = value if isinstance(value, type) else type(value)
+    return _model_schema_kind_for(model_type)
+
+
+@lru_cache(maxsize=2048)
+def _model_schema_kind_for(model_type: type) -> int:
+    cached = getattr(model_type, _MODEL_SCHEMA_KIND_ATTR, None)
+    if isinstance(cached, int):
+        return cached
     if is_data_model_type(model_type):
         return MODEL_SCHEMA_KIND_GN_DATAMODEL
     if is_pydantic_model_type(model_type):
@@ -436,6 +482,14 @@ def model_schema_kind(value: Any) -> int:
 
 def model_schema_name(value: Any) -> str:
     model_type = value if isinstance(value, type) else type(value)
+    return _model_schema_name_for(model_type)
+
+
+@lru_cache(maxsize=2048)
+def _model_schema_name_for(model_type: type) -> str:
+    cached = getattr(model_type, _MODEL_SCHEMA_NAME_ATTR, None)
+    if isinstance(cached, str):
+        return cached
     if not is_model_type(model_type):
         raise TypeError(f"Unsupported model type: {model_type!r}")
     module = getattr(model_type, "__module__", "")
@@ -454,8 +508,14 @@ def _adapter_for(model_class: type) -> TypeAdapter:
 def _data_model_fields_for(model_class: type) -> tuple[tuple[str, Any, Any, Any, Callable[[Any], bool], str], ...]:
     try:
         type_hints = get_type_hints(model_class, include_extras=True)
-    except Exception:
-        type_hints = getattr(model_class, "__annotations__", {})
+    except Exception as exc:
+        raise DataModelValidationError(
+            f"Cannot resolve type hints for {model_class.__name__}: {exc}. "
+            f"Every annotation must be resolvable at validation time. Forward and "
+            f"self references declared at module scope resolve automatically; "
+            f"names that exist only under 'if TYPE_CHECKING' or that are "
+            f"misspelled fail here instead of silently disabling validation."
+        ) from exc
     result = []
     for field in _dataclass_fields(model_class):
         annotation = type_hints.get(field.name, field.type)
