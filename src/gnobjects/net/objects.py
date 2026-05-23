@@ -24,6 +24,7 @@ from ._data_pack import (
     unpack_temp_data_header,
     IncompleteGNFrameError,
     VFSDFrame,
+    MIN_FAT_PART_SIZE,
     _Aracada_container_packer
     )
 
@@ -564,6 +565,66 @@ class VFSDContainer:
             raise ValueError(f'VFSD frame stream count mismatch: header={count}, payload={emitted}')
 
 
+class FATManifestContainer:
+    __slots__ = ['version', 'size', 'part_size', 'parts_count', 'checksum', 'created_ns', 'payload', 'compression_info']
+
+    def __init__(
+        self,
+        size: int,
+        part_size: int,
+        parts_count: int,
+        payload: Iterable[bytes | bytearray | memoryview] | bytes | bytearray | memoryview | None = None,
+        checksum: bytes | bytearray | memoryview | None = None,
+        created_ns: int = 0,
+        version: int = 0,
+        compression_info: tuple[int, int, int, int] | None = None,
+    ) -> None:
+        """
+        # Контейнер FAT manifest
+
+        Payload - плотный bytearray/list из `abs_id` частей. Каждый `abs_id` всегда 32 байта,
+        поэтому разделитель между частями не хранится.
+        """
+        if type(part_size) is not int or part_size < MIN_FAT_PART_SIZE:
+            raise ValueError(f'part_size must be >= {MIN_FAT_PART_SIZE} bytes')
+        self.version = version
+        self.size = size
+        self.part_size = part_size
+        self.parts_count = parts_count
+        self.checksum = None if checksum is None else bytes(checksum)
+        self.created_ns = created_ns
+        self.payload = _Aracada_container_packer.pack_fat_manifest_payload([] if payload is None else payload)
+        self.compression_info = compression_info
+
+    @property
+    def parts_abs_ids(self) -> list[bytes]:
+        return list(_Aracada_container_packer.iter_fat_manifest_payload_abs_ids(self.payload))
+
+    def iterPartsAbsIds(self) -> Iterator[bytes]:
+        return _Aracada_container_packer.iter_fat_manifest_payload_abs_ids(self.payload)
+
+    def serialize(self) -> bytes:
+        if len(self.payload) != self.parts_count * 32:
+            raise ValueError(
+                f'FAT manifest part count mismatch: count={self.parts_count}, payload={len(self.payload) // 32}'
+            )
+        return _Aracada_container_packer.encode_fat_manifest(
+            self.payload,
+            self.size,
+            self.part_size,
+            self.parts_count,
+            self.checksum,
+            self.created_ns,
+            self.version,
+            self.compression_info,
+        )
+
+    @staticmethod
+    def deserialize(data: bytes) -> 'FATManifestContainer':
+        version, size, part_size, parts_count, checksum, created_ns, payload, compression_info = _Aracada_container_packer.decode_fat_manifest(data)
+        return FATManifestContainer(size, part_size, parts_count, payload, checksum, created_ns, version, compression_info)
+
+
 class TempDataObject:
     __slots__ = ['_container']
 
@@ -584,7 +645,7 @@ class TempDataObject:
 
     @overload
     def __init__(self,
-                container: STPContainer | ITPContainer | VFSDContainer | bytes | None = None
+                container: STPContainer | ITPContainer | VFSDContainer | FATManifestContainer | bytes | None = None
     ) -> None:
         """
         # Временный объект данных
@@ -615,7 +676,7 @@ class TempDataObject:
                 interpretatorVersion = 0
             self._container = ITPContainer(interpreterType, payload, interpretatorVersion, compression_info)
 
-    def setContainer(self, container: STPContainer | ITPContainer | VFSDContainer | bytes):
+    def setContainer(self, container: STPContainer | ITPContainer | VFSDContainer | FATManifestContainer | bytes):
         if isinstance(container, (bytearray, memoryview)):
             container = bytes(container)
         self._container = container
@@ -634,7 +695,7 @@ class TempDataObject:
         return self._container.serialize()
     
     @property
-    def container(self) -> STPContainer | ITPContainer | VFSDContainer | None:
+    def container(self) -> STPContainer | ITPContainer | VFSDContainer | FATManifestContainer | None:
         """
         # Контейнер данных
 
@@ -657,7 +718,7 @@ class TempDataObject:
 
         return tdo
     
-    def _unpack_container(self) -> STPContainer | ITPContainer | VFSDContainer:
+    def _unpack_container(self) -> STPContainer | ITPContainer | VFSDContainer | FATManifestContainer:
         if self._container is None:
             raise ValueError('TempDataObject container is None')
         
@@ -670,6 +731,8 @@ class TempDataObject:
                 self._container = STPContainer.deserialize(self._container)
             elif t == 3:  # VFSD
                 self._container = VFSDContainer.deserialize(self._container)
+            elif t == 4:  # FAT manifest
+                self._container = FATManifestContainer.deserialize(self._container)
             else:
                 raise ValueError('Invalid TempDataObject data')
         
@@ -695,6 +758,19 @@ class TempDataObject:
         compression_info: tuple[int, int, int, int] | None = None,
     ) -> 'TempDataObject':
         return TempDataObject(VFSDContainer(path, payload, version, created_ns, updated_ns, epoch, count, compression_info))
+
+    @staticmethod
+    def FATManifest(
+        size: int,
+        part_size: int,
+        parts_count: int,
+        payload: Iterable[bytes | bytearray | memoryview] | bytes | bytearray | memoryview,
+        checksum: bytes | bytearray | memoryview | None = None,
+        created_ns: int = 0,
+        version: int = 0,
+        compression_info: tuple[int, int, int, int] | None = None,
+    ) -> 'TempDataObject':
+        return TempDataObject(FATManifestContainer(size, part_size, parts_count, payload, checksum, created_ns, version, compression_info))
     
     def __repr__(self) -> str:
         return "<TempDataObject>"
@@ -740,7 +816,7 @@ class _AsyncPayloadState:
         self._payload_complete = False
         self._payload_incomplete = False
         self._waiters: list[asyncio.Future[None]] = []
-        self._container_header: object | STPContainer | ITPContainer | VFSDContainer | None = _PAYLOAD_NOT_READY
+        self._container_header: object | STPContainer | ITPContainer | VFSDContainer | FATManifestContainer | None = _PAYLOAD_NOT_READY
         self._container_header_len: Optional[int] = None
         self._container_waiters: list[asyncio.Future[None]] = []
         self._failure: Optional[Exception] = None
@@ -882,7 +958,7 @@ class _AsyncPayloadState:
             break
 
         if header['container_type'] == 1:
-            container: STPContainer | ITPContainer | VFSDContainer = ITPContainer(
+            container: STPContainer | ITPContainer | VFSDContainer | FATManifestContainer = ITPContainer(
                 header['interpreterType'],
                 b'',
                 header['interpretatorVersion'],
@@ -899,6 +975,17 @@ class _AsyncPayloadState:
                 header['updated_ns'],
                 header['epoch'],
                 header['count'],
+                header['compression_info'],
+            )
+        elif header['container_type'] == 4:
+            container = FATManifestContainer(
+                header['size'],
+                header['part_size'],
+                header['parts_count'],
+                b'',
+                header['checksum'],
+                header['created_ns'],
+                header['version'],
                 header['compression_info'],
             )
         else:
@@ -991,11 +1078,11 @@ class _AsyncPayloadState:
                 return None
             await self._wait_for_completion()
 
-    async def get_container_header(self) -> Optional[STPContainer | ITPContainer | VFSDContainer]:
+    async def get_container_header(self) -> Optional[STPContainer | ITPContainer | VFSDContainer | FATManifestContainer]:
         while True:
             self._raise_failure()
             if self._container_header is not _PAYLOAD_NOT_READY:
-                return cast(Optional[STPContainer | ITPContainer | VFSDContainer], self._container_header)
+                return cast(Optional[STPContainer | ITPContainer | VFSDContainer | FATManifestContainer], self._container_header)
             if self._consumer == 'stream' and self._consumed:
                 raise RuntimeError('Payload stream has already been consumed; container header is no longer available')
             if self._payload_incomplete:

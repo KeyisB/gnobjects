@@ -88,6 +88,10 @@ class IncompleteGNFrameError(ValueError):
 
 
 VFSD_CONTAINER_TYPE = 3
+FAT_MANIFEST_CONTAINER_TYPE = 4
+ABS_ID_BYTES_LEN = 32
+XXH3_128_BYTES_LEN = 16
+MIN_FAT_PART_SIZE = 1024
 VFSDFrame = tuple[int, str, bytes, int, bytes | None]
 
 
@@ -167,6 +171,50 @@ def unpack_vfsd_payload(payload: bytes | bytearray | memoryview, count: Optional
     if count is not None and len(frames) != count:
         raise ValueError(f"VFSD payload frame count mismatch: header={count}, payload={len(frames)}")
     return frames
+
+
+def _normalize_fat_manifest_checksum(checksum: bytes | bytearray | memoryview | None) -> bytes | None:
+    if checksum is None:
+        return None
+    if not isinstance(checksum, (bytes, bytearray, memoryview)):
+        raise TypeError("checksum must be bytes or None")
+    result = bytes(checksum)
+    if len(result) != XXH3_128_BYTES_LEN:
+        raise ValueError(f"checksum must be bytes({XXH3_128_BYTES_LEN})")
+    return result
+
+
+def pack_fat_manifest_payload(parts_abs_ids: Iterable[bytes | bytearray | memoryview] | bytes | bytearray | memoryview) -> bytes:
+    if isinstance(parts_abs_ids, (bytes, bytearray, memoryview)):
+        payload = bytes(parts_abs_ids)
+        if len(payload) % ABS_ID_BYTES_LEN != 0:
+            raise ValueError("FAT manifest payload length must be divisible by 32")
+        return payload
+
+    out = bytearray()
+    for abs_id in parts_abs_ids:
+        if not isinstance(abs_id, (bytes, bytearray, memoryview)):
+            raise TypeError("FAT manifest part abs_id must be bytes(32)")
+        abs_id_bytes = bytes(abs_id)
+        if len(abs_id_bytes) != ABS_ID_BYTES_LEN:
+            raise ValueError("FAT manifest part abs_id must be bytes(32)")
+        out.extend(abs_id_bytes)
+    return bytes(out)
+
+
+def iter_fat_manifest_payload_abs_ids(payload: bytes | bytearray | memoryview) -> Iterator[bytes]:
+    blob = bytes(payload)
+    if len(blob) % ABS_ID_BYTES_LEN != 0:
+        raise ValueError("FAT manifest payload length must be divisible by 32")
+    for pos in range(0, len(blob), ABS_ID_BYTES_LEN):
+        yield blob[pos:pos + ABS_ID_BYTES_LEN]
+
+
+def unpack_fat_manifest_payload(payload: bytes | bytearray | memoryview, parts_count: Optional[int] = None) -> list[bytes]:
+    parts = list(iter_fat_manifest_payload_abs_ids(payload))
+    if parts_count is not None and len(parts) != parts_count:
+        raise ValueError(f"FAT manifest part count mismatch: header={parts_count}, payload={len(parts)}")
+    return parts
 
 
 # ===== gnrequest =====
@@ -1452,6 +1500,8 @@ def unpack_temp_data_header(data: bytes) -> Tuple[dict, int]:
         return unpack_stp_header(data)
     if container_type == VFSD_CONTAINER_TYPE:
         return unpack_vfsd_header(data)
+    if container_type == FAT_MANIFEST_CONTAINER_TYPE:
+        return unpack_fat_manifest_header(data)
     raise ValueError(f"Unsupported container type: {container_type}")
 
 
@@ -1556,6 +1606,49 @@ def unpack_vfsd_header(data: bytes) -> Tuple[dict, int]:
         'created_ns': created_ns,
         'updated_ns': updated_ns,
         'epoch': epoch,
+        'compression_info': compression_info,
+    }, pos
+
+
+def unpack_fat_manifest_header(data: bytes) -> Tuple[dict, int]:
+    if len(data) < 2:
+        raise IncompleteGNFrameError("Data too short for FAT manifest header")
+
+    container_type = int.from_bytes(data[0:2], "big")
+    if container_type != FAT_MANIFEST_CONTAINER_TYPE:
+        raise ValueError(f"Unsupported container type: {container_type}")
+
+    pos = 2
+    version, pos = _decode_varlen_1248_at(data, pos)
+
+    if len(data) <= pos:
+        raise IncompleteGNFrameError("Data too short for FAT manifest compression header")
+    compression_info = unpack_byte_1_1_4_2(data[pos])
+    pos += 1
+
+    size, pos = _decode_varlen_1248_at(data, pos)
+    part_size, pos = _decode_varlen_1248_at(data, pos)
+    if part_size < MIN_FAT_PART_SIZE:
+        raise ValueError(f"part_size must be >= {MIN_FAT_PART_SIZE} bytes")
+    parts_count, pos = _decode_varlen_1248_at(data, pos)
+
+    try:
+        checksum, checksum_size = decode_data_with_len(data[pos:], '1248')
+    except ValueError as exc:
+        raise IncompleteGNFrameError(str(exc)) from exc
+    pos += checksum_size
+    checksum_value = _normalize_fat_manifest_checksum(checksum) if checksum else None
+
+    created_ns, pos = _decode_varlen_1248_at(data, pos)
+
+    return {
+        'container_type': FAT_MANIFEST_CONTAINER_TYPE,
+        'version': version,
+        'size': size,
+        'part_size': part_size,
+        'parts_count': parts_count,
+        'checksum': checksum_value,
+        'created_ns': created_ns,
         'compression_info': compression_info,
     }, pos
 
@@ -2252,3 +2345,99 @@ class _Aracada_container_packer:
     @staticmethod
     def normalize_vfsd_frame(frame: Any) -> VFSDFrame:
         return _normalize_vfsd_frame(frame)
+
+    @staticmethod
+    def encode_fat_manifest_header(
+        size: int,
+        part_size: int,
+        parts_count: int,
+        checksum: Optional[bytes | bytearray | memoryview],
+        created_ns: int,
+        version: int = 0,
+        compression_info: Optional[Tuple[int, int, int, int]] = None,
+    ) -> tuple[bytes, Tuple[int, int, int, int]]:
+        version = _require_vfsd_uint(version, "version")
+        size = _require_vfsd_uint(size, "size")
+        part_size = _require_vfsd_uint(part_size, "part_size")
+        parts_count = _require_vfsd_uint(parts_count, "parts_count")
+        created_ns = _require_vfsd_uint(created_ns, "created_ns")
+        checksum_bytes = _normalize_fat_manifest_checksum(checksum)
+        if part_size < MIN_FAT_PART_SIZE:
+            raise ValueError(f"part_size must be >= {MIN_FAT_PART_SIZE} bytes")
+        if parts_count <= 0:
+            raise ValueError("parts_count must be > 0")
+
+        head = bytearray()
+        head.extend(FAT_MANIFEST_CONTAINER_TYPE.to_bytes(2, "big"))
+        head.extend(encode_varlen_1248(version))
+
+        if compression_info is not None:
+            compression_support = compression_info
+            head.extend(bytes([pack_byte_1_1_4_2(*compression_support)]))
+        else:
+            compression_support = (0, 0, 0, 0)
+            head.extend(bytes([0]))
+
+        head.extend(encode_varlen_1248(size))
+        head.extend(encode_varlen_1248(part_size))
+        head.extend(encode_varlen_1248(parts_count))
+        head.extend(encode_data_with_len(checksum_bytes or b'', '1248'))
+        head.extend(encode_varlen_1248(created_ns))
+
+        return bytes(head), compression_support
+
+    @staticmethod
+    def encode_fat_manifest(
+        parts_abs_ids: Iterable[bytes | bytearray | memoryview] | bytes | bytearray | memoryview,
+        size: int,
+        part_size: int,
+        parts_count: int,
+        checksum: Optional[bytes | bytearray | memoryview],
+        created_ns: int,
+        version: int = 0,
+        compression_info: Optional[Tuple[int, int, int, int]] = None,
+    ) -> bytes:
+        payload = pack_fat_manifest_payload(parts_abs_ids)
+        if len(payload) != parts_count * ABS_ID_BYTES_LEN:
+            raise ValueError(
+                f"FAT manifest payload part count mismatch: header={parts_count}, payload={len(payload) // ABS_ID_BYTES_LEN}"
+            )
+        head, compression_support = _Aracada_container_packer.encode_fat_manifest_header(
+            size,
+            part_size,
+            parts_count,
+            checksum,
+            created_ns,
+            version,
+            compression_info,
+        )
+        payload = _Aracada_container_packer._compress_object(payload, *compression_support)
+        return head + payload
+
+    @staticmethod
+    def decode_fat_manifest(data: bytes) -> tuple[int, int, int, int, bytes | None, int, bytes, tuple[int, int, int, int]]:
+        header, header_len = unpack_fat_manifest_header(data)
+        payload_comp = data[header_len:]
+        compression_info = header['compression_info']
+        payload = _Aracada_container_packer._decompress_object(payload_comp, *compression_info)
+        parts = unpack_fat_manifest_payload(payload, header['parts_count'])
+        payload = b''.join(parts)
+
+        return (
+            header['version'],
+            header['size'],
+            header['part_size'],
+            header['parts_count'],
+            header['checksum'],
+            header['created_ns'],
+            payload,
+            compression_info,
+        )
+
+    @staticmethod
+    def iter_fat_manifest_payload_abs_ids(payload: bytes | bytearray | memoryview) -> Iterator[bytes]:
+        return iter_fat_manifest_payload_abs_ids(payload)
+
+    @staticmethod
+    def pack_fat_manifest_payload(parts_abs_ids: Iterable[bytes | bytearray | memoryview] | bytes | bytearray | memoryview) -> bytes:
+        return pack_fat_manifest_payload(parts_abs_ids)
