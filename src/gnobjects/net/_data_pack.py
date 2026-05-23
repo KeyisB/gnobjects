@@ -89,6 +89,7 @@ class IncompleteGNFrameError(ValueError):
 
 VFSD_CONTAINER_TYPE = 3
 FAT_MANIFEST_CONTAINER_TYPE = 4
+DMP_CONTAINER_TYPE = 5
 ABS_ID_BYTES_LEN = 32
 XXH3_128_BYTES_LEN = 16
 MIN_FAT_PART_SIZE = 1024
@@ -1489,6 +1490,42 @@ def unpack_gnresponse_header(data: bytes) -> Tuple[dict, int, Optional[int]]:
         raise ValueError('Unsupported version')
 
 
+def unpack_dmp_header(data: bytes) -> Tuple[dict, int]:
+    if len(data) < 3:
+        raise IncompleteGNFrameError("Data too short for DMP header")
+
+    pos = 2
+    schema_kind = data[pos]
+    pos += 1
+    try:
+        raw_schema, schema_len = decode_data_with_len(data[pos:], '1248')
+        schema_name = raw_schema.decode('utf-8')
+    except (ValueError, IndexError, UnicodeDecodeError) as exc:
+        raise IncompleteGNFrameError(str(exc)) from exc
+    pos += schema_len
+
+    try:
+        version, vsize = decode_varlen_1248(data[pos:])
+    except (ValueError, IndexError) as exc:
+        raise IncompleteGNFrameError(str(exc)) from exc
+    pos += vsize
+
+    if len(data) <= pos:
+        raise IncompleteGNFrameError("Data too short for DMP compression header")
+
+    compression_info = unpack_byte_1_1_4_2(data[pos])
+    pos += 1
+
+    return {
+        'container_type': DMP_CONTAINER_TYPE,
+        'schema_kind': schema_kind,
+        'schema_name': schema_name,
+        'version': version,
+        'interpretatorVersion': version,
+        'compression_info': compression_info,
+    }, pos
+
+
 def unpack_temp_data_header(data: bytes) -> Tuple[dict, int]:
     if len(data) < 2:
         raise IncompleteGNFrameError("Data too short for container header")
@@ -1502,6 +1539,8 @@ def unpack_temp_data_header(data: bytes) -> Tuple[dict, int]:
         return unpack_vfsd_header(data)
     if container_type == FAT_MANIFEST_CONTAINER_TYPE:
         return unpack_fat_manifest_header(data)
+    if container_type == DMP_CONTAINER_TYPE:
+        return unpack_dmp_header(data)
     raise ValueError(f"Unsupported container type: {container_type}")
 
 
@@ -2441,3 +2480,59 @@ class _Aracada_container_packer:
     @staticmethod
     def pack_fat_manifest_payload(parts_abs_ids: Iterable[bytes | bytearray | memoryview] | bytes | bytearray | memoryview) -> bytes:
         return pack_fat_manifest_payload(parts_abs_ids)
+
+    @staticmethod
+    def encode_dmp(
+        data: bytes,
+        schema_name: str,
+        version: int = 0,
+        compression_info: tuple[int, int, int, int] | None = None,
+        schema_kind: int = 0,
+    ) -> bytes:
+        if not isinstance(schema_kind, int) or not 0 <= schema_kind <= 255:
+            raise ValueError("schema_kind must be int in range 0..255")
+        head = bytearray()
+        head.extend(DMP_CONTAINER_TYPE.to_bytes(2, "big"))
+        head.append(schema_kind)
+        head.extend(encode_data_with_len(schema_name.encode('utf-8'), '1248'))
+        head.extend(encode_varlen_1248(version))
+        if compression_info is not None:
+            head.extend(bytes([pack_byte_1_1_4_2(*compression_info)]))
+            payload = _Aracada_container_packer._compress_object(data, *compression_info)
+        else:
+            head.extend(bytes([0]))
+            payload = data
+        return bytes(head) + payload
+
+    @staticmethod
+    def decode_dmp(data: bytes) -> tuple[int, str, int, bytes, tuple[int, int, int, int]]:
+        if len(data) < 3:
+            raise ValueError("Data too short for DMP container header")
+        container_type = int.from_bytes(data[0:2], "big")
+        if container_type != DMP_CONTAINER_TYPE:
+            raise ValueError(f"Unsupported container type: {container_type}")
+
+        pos = 2
+        schema_kind = data[pos]
+        pos += 1
+        try:
+            raw_schema, schema_len = decode_data_with_len(data[pos:], '1248')
+            schema_name = raw_schema.decode('utf-8')
+        except (ValueError, IndexError, UnicodeDecodeError) as exc:
+            raise ValueError(str(exc)) from exc
+        pos += schema_len
+
+        try:
+            version, vsize = decode_varlen_1248(data[pos:])
+        except (ValueError, IndexError) as exc:
+            raise ValueError(str(exc)) from exc
+        pos += vsize
+
+        if len(data) <= pos:
+            raise ValueError("Data too short for DMP compression header")
+        compression_info = unpack_byte_1_1_4_2(data[pos])
+        pos += 1
+
+        payload = _Aracada_container_packer._decompress_object(data[pos:], *compression_info)
+
+        return (schema_kind, schema_name, version, payload, compression_info)

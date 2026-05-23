@@ -11,6 +11,13 @@ from pathlib import Path
 from KeyisBTools.models.serialization import serialize, deserialize, SerializableType
 
 from .gnTransportProtocolParser import GNTransportProtocol, parse_gn_protocol
+from .base_model import (
+    is_model_instance as _is_gn_model_instance,
+    ModelPayload,
+    model_schema_kind as _gn_model_schema_kind,
+    model_schema_name as _gn_model_schema_name,
+    model_validate_dump as _gn_model_validate_dump,
+)
 from .values import tablex_file_extension_to_inType
 from ._data_pack import (
     pack_gnrequest,
@@ -25,6 +32,7 @@ from ._data_pack import (
     IncompleteGNFrameError,
     VFSDFrame,
     MIN_FAT_PART_SIZE,
+    DMP_CONTAINER_TYPE,
     _Aracada_container_packer
     )
 
@@ -625,6 +633,55 @@ class FATManifestContainer:
         return FATManifestContainer(size, part_size, parts_count, payload, checksum, created_ns, version, compression_info)
 
 
+class DMPContainer:
+    __slots__ = ['version', 'schema_kind', 'schema_name', 'payload', 'compression_info']
+
+    def __init__(
+        self,
+        schema_name: str,
+        payload: SerializableType,
+        version: int = 0,
+        compression_info: tuple[int, int, int, int] | None = None,
+        schema_kind: int = 0,
+    ) -> None:
+        """
+        # Контейнер DMP (Data Model Payload)
+
+        Контейнер для передачи типизированных данных по схеме. Payload — сериализуемый объект,
+        ассоциированный с именем схемы (`schema_name`). Валидация по схеме — ответственность вызывающего кода.
+
+        :param schema_name: Имя схемы (например, имя Pydantic-модели).
+        :param payload: Полезная нагрузка — сериализуемый объект (dict, list и т.д.).
+        :param version: Версия схемы.
+        :param compression_info: Параметры сжатия. Если None — сжатие не используется.
+        """
+        if not isinstance(schema_name, str) or not schema_name:
+            raise ValueError('schema_name must be a non-empty str')
+        if not isinstance(schema_kind, int) or not 0 <= schema_kind <= 255:
+            raise ValueError('schema_kind must be int in range 0..255')
+        self.schema_name = schema_name
+        self.schema_kind = schema_kind
+        self.version = version
+        self.payload = payload
+        self.compression_info = compression_info
+
+    def serialize(self) -> bytes:
+        return _Aracada_container_packer.encode_dmp(
+            serialize(self.payload),
+            self.schema_name,
+            self.version,
+            self.compression_info,
+            self.schema_kind,
+        )
+
+    @staticmethod
+    def deserialize(data: bytes) -> 'DMPContainer':
+        r = _Aracada_container_packer.decode_dmp(data)
+        schema_kind, schema_name, version, payload_bytes, compression_info = r
+        payload = deserialize(payload_bytes)
+        return DMPContainer(schema_name, payload, version, compression_info, schema_kind)
+
+
 class TempDataObject:
     __slots__ = ['_container']
 
@@ -645,7 +702,7 @@ class TempDataObject:
 
     @overload
     def __init__(self,
-                container: STPContainer | ITPContainer | VFSDContainer | FATManifestContainer | bytes | None = None
+                container: STPContainer | ITPContainer | VFSDContainer | FATManifestContainer | DMPContainer | bytes | None = None
     ) -> None:
         """
         # Временный объект данных
@@ -676,7 +733,7 @@ class TempDataObject:
                 interpretatorVersion = 0
             self._container = ITPContainer(interpreterType, payload, interpretatorVersion, compression_info)
 
-    def setContainer(self, container: STPContainer | ITPContainer | VFSDContainer | FATManifestContainer | bytes):
+    def setContainer(self, container: STPContainer | ITPContainer | VFSDContainer | FATManifestContainer | DMPContainer | bytes):
         if isinstance(container, (bytearray, memoryview)):
             container = bytes(container)
         self._container = container
@@ -695,7 +752,7 @@ class TempDataObject:
         return self._container.serialize()
     
     @property
-    def container(self) -> STPContainer | ITPContainer | VFSDContainer | FATManifestContainer | None:
+    def container(self) -> STPContainer | ITPContainer | VFSDContainer | FATManifestContainer | DMPContainer | None:
         """
         # Контейнер данных
 
@@ -718,7 +775,7 @@ class TempDataObject:
 
         return tdo
     
-    def _unpack_container(self) -> STPContainer | ITPContainer | VFSDContainer | FATManifestContainer:
+    def _unpack_container(self) -> STPContainer | ITPContainer | VFSDContainer | FATManifestContainer | DMPContainer:
         if self._container is None:
             raise ValueError('TempDataObject container is None')
         
@@ -733,6 +790,8 @@ class TempDataObject:
                 self._container = VFSDContainer.deserialize(self._container)
             elif t == 4:  # FAT manifest
                 self._container = FATManifestContainer.deserialize(self._container)
+            elif t == DMP_CONTAINER_TYPE:  # DMP
+                self._container = DMPContainer.deserialize(self._container)
             else:
                 raise ValueError('Invalid TempDataObject data')
         
@@ -771,7 +830,17 @@ class TempDataObject:
         compression_info: tuple[int, int, int, int] | None = None,
     ) -> 'TempDataObject':
         return TempDataObject(FATManifestContainer(size, part_size, parts_count, payload, checksum, created_ns, version, compression_info))
-    
+
+    @staticmethod
+    def DMP(
+        schema_name: str,
+        payload: SerializableType,
+        version: int = 0,
+        compression_info: tuple[int, int, int, int] | None = None,
+        schema_kind: int = 0,
+    ) -> 'TempDataObject':
+        return TempDataObject(DMPContainer(schema_name, payload, version, compression_info, schema_kind))
+
     def __repr__(self) -> str:
         return "<TempDataObject>"
 
@@ -816,7 +885,7 @@ class _AsyncPayloadState:
         self._payload_complete = False
         self._payload_incomplete = False
         self._waiters: list[asyncio.Future[None]] = []
-        self._container_header: object | STPContainer | ITPContainer | VFSDContainer | FATManifestContainer | None = _PAYLOAD_NOT_READY
+        self._container_header: object | STPContainer | ITPContainer | VFSDContainer | FATManifestContainer | DMPContainer | None = _PAYLOAD_NOT_READY
         self._container_header_len: Optional[int] = None
         self._container_waiters: list[asyncio.Future[None]] = []
         self._failure: Optional[Exception] = None
@@ -958,7 +1027,7 @@ class _AsyncPayloadState:
             break
 
         if header['container_type'] == 1:
-            container: STPContainer | ITPContainer | VFSDContainer | FATManifestContainer = ITPContainer(
+            container: STPContainer | ITPContainer | VFSDContainer | FATManifestContainer | DMPContainer = ITPContainer(
                 header['interpreterType'],
                 b'',
                 header['interpretatorVersion'],
@@ -987,6 +1056,14 @@ class _AsyncPayloadState:
                 header['created_ns'],
                 header['version'],
                 header['compression_info'],
+            )
+        elif header['container_type'] == DMP_CONTAINER_TYPE:
+            container = DMPContainer(
+                header['schema_name'],
+                {},
+                header['version'],
+                header['compression_info'],
+                header['schema_kind'],
             )
         else:
             self._failure = ValueError(f"Unsupported container type: {header['container_type']}")
@@ -1078,11 +1155,11 @@ class _AsyncPayloadState:
                 return None
             await self._wait_for_completion()
 
-    async def get_container_header(self) -> Optional[STPContainer | ITPContainer | VFSDContainer | FATManifestContainer]:
+    async def get_container_header(self) -> Optional[STPContainer | ITPContainer | VFSDContainer | FATManifestContainer | DMPContainer]:
         while True:
             self._raise_failure()
             if self._container_header is not _PAYLOAD_NOT_READY:
-                return cast(Optional[STPContainer | ITPContainer | VFSDContainer | FATManifestContainer], self._container_header)
+                return cast(Optional[STPContainer | ITPContainer | VFSDContainer | FATManifestContainer | DMPContainer], self._container_header)
             if self._consumer == 'stream' and self._consumed:
                 raise RuntimeError('Payload stream has already been consumed; container header is no longer available')
             if self._payload_incomplete:
@@ -1370,7 +1447,7 @@ class GNRequest:
         self,
         method: str,
         url: Url,
-        payload: TempDataObject | SerializableType | AsyncIterable[bytes] | None = None,
+        payload: TempDataObject | SerializableType | AsyncIterable[bytes] | ModelPayload | None = None,
         cookies: dict | None = None,
         transport: str | None = None,
         route: str | None = None,
@@ -1422,6 +1499,12 @@ class GNRequest:
         else:
             if isinstance(payload, TempDataObject):
                 self._tdo = payload
+            elif _is_gn_model_instance(payload):
+                self._tdo = TempDataObject.DMP(
+                    _gn_model_schema_name(payload),
+                    _gn_model_validate_dump(payload),
+                    schema_kind=_gn_model_schema_kind(payload),
+                )
             else:
                 self._tdo = TempDataObject.STP(cast(SerializableType, payload))
 
@@ -2316,7 +2399,7 @@ class GNResponse(Exception):
     """
     def __init__(self,
                  command: str | int | bool | bytes,
-                 payload: SerializableType | 'TempDataObject' | AsyncIterable[bytes] | None = None,
+                 payload: SerializableType | 'TempDataObject' | AsyncIterable[bytes] | ModelPayload | None = None,
                  cookies: dict | None = None,
                  payloadSize: Optional[int] = None
                  ):
@@ -2358,6 +2441,12 @@ class GNResponse(Exception):
         else:
             if isinstance(payload, TempDataObject):
                 self._tdo = payload
+            elif _is_gn_model_instance(payload):
+                self._tdo = TempDataObject.DMP(
+                    _gn_model_schema_name(payload),
+                    _gn_model_validate_dump(payload),
+                    schema_kind=_gn_model_schema_kind(payload),
+                )
             else:
                 tdo = TempDataObject.STP(cast(SerializableType, payload))
                 self._tdo = tdo

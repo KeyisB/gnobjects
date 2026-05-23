@@ -4,6 +4,7 @@
         "msgpack",
         "pycryptodome",
         "anyio",
-        "zstandard"
+        "zstandard",
+        "pydantic"
     ]
 }
