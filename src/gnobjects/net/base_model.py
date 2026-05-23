@@ -232,31 +232,51 @@ def Field(
 
 
 class _ModelAccessor:
-    __slots__ = ("_inst",)
+    __slots__ = ("_inst", "_model_class")
 
-    def __init__(self, inst: Any) -> None:
+    def __init__(self, inst: Any = None, model_class: type | None = None) -> None:
         self._inst = inst
+        self._model_class = model_class if model_class is not None else type(inst)
+
+    def _require_instance(self) -> Any:
+        if self._inst is None:
+            raise TypeError("This model operation requires a model instance")
+        return self._inst
+
+    def _require_model_class(self) -> type:
+        if self._model_class is None:
+            raise TypeError("This model operation requires a model class")
+        return self._model_class
 
     def dump(self) -> dict[str, Any]:
-        return model_dump(self._inst)
+        return model_dump(self._require_instance())
+
+    def toDict(self) -> dict[str, Any]:
+        return self.dump()
+
+    def fromDict(self, obj: Any, **kwargs: Any) -> Any:
+        return model_validate(self._require_model_class(), obj, **kwargs)
 
     def dump_json(self, **kwargs: Any) -> str:
-        data = _adapter_for(type(self._inst)).dump_json(self._inst, **kwargs)
+        inst = self._require_instance()
+        data = _adapter_for(type(inst)).dump_json(inst, **kwargs)
         return data.decode("utf-8")
 
     def copy(self, *, update: dict[str, Any] | None = None, deep: bool = False) -> Any:
-        data = model_dump(self._inst)
+        inst = self._require_instance()
+        data = model_dump(inst)
         if deep:
             data = _copy.deepcopy(data)
         if update:
             data.update(update)
-        return type(self._inst)(**data)
+        return type(inst)(**data)
 
     @property
     def fields_set(self) -> set[str]:
-        if isinstance(self._inst, _PydanticBaseModel):
-            return set(self._inst.model_fields_set)
-        return {f.name for f in _dataclass_fields(self._inst)}
+        inst = self._require_instance()
+        if isinstance(inst, _PydanticBaseModel):
+            return set(inst.model_fields_set)
+        return {f.name for f in _dataclass_fields(inst)}
 
     @staticmethod
     def validate(model_class: type[_T], obj: Any, **kwargs: Any) -> _T:
@@ -298,12 +318,19 @@ class _ModelAccessor:
         return {}
 
 
+class _ModelAccessorDescriptor:
+    __slots__ = ()
+
+    def __get__(self, inst: Any, owner: type | None = None) -> _ModelAccessor:
+        return _ModelAccessor(inst, owner if owner is not None else type(inst))
+
+
 ModelPayload: TypeAlias = _PydanticBaseModel | _DataclassInstance
 
 
 def _attach_model_accessor(model_class: type[_T]) -> type[_T]:
     if "model" not in getattr(model_class, "__dataclass_fields__", {}):
-        setattr(model_class, "model", property(lambda self: _ModelAccessor(self)))
+        setattr(model_class, "model", _ModelAccessorDescriptor())
     return model_class
 
 
