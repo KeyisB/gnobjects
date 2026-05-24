@@ -40,8 +40,33 @@ MODEL_SCHEMA_KIND_NAMES = {
 }
 
 
-class DataModelValidationError(ValueError):
-    pass
+class DataModelError(Exception):
+    __slots__ = ("detail",)
+    code = "data_model_error"
+
+    def __init__(self, detail: str) -> None:
+        self.detail = detail
+        super().__init__(detail)
+
+
+class DataModelDefinitionError(DataModelError):
+    code = "data_model_definition_error"
+
+
+class DataModelFieldError(DataModelError):
+    code = "data_model_field_error"
+
+
+class DataModelSchemaError(DataModelError):
+    code = "data_model_schema_error"
+
+
+class DataModelUsageError(DataModelError):
+    code = "data_model_usage_error"
+
+
+class DataModelValidationError(DataModelError):
+    code = "data_model_validation_error"
 
 
 @_stdlib_dataclass(frozen=True, slots=True)
@@ -133,20 +158,30 @@ class Range:
 
     def __post_init__(self) -> None:
         if self.min is None and self.max is None:
-            raise ValueError("Range requires min or max")
+            raise DataModelFieldError("Range requires min or max")
         if not isinstance(self.min_inclusive, bool):
-            raise TypeError("Range.min_inclusive must be bool")
+            raise DataModelFieldError(
+                f"Range.min_inclusive must be bool, got {type(self.min_inclusive).__name__}"
+            )
         if not isinstance(self.max_inclusive, bool):
-            raise TypeError("Range.max_inclusive must be bool")
+            raise DataModelFieldError(
+                f"Range.max_inclusive must be bool, got {type(self.max_inclusive).__name__}"
+            )
         if self.min is not None and self.max is not None:
             try:
                 invalid = self.min > self.max or (
                     self.min == self.max and not (self.min_inclusive and self.max_inclusive)
                 )
             except TypeError as exc:
-                raise TypeError("Range min and max must be comparable") from exc
+                raise DataModelFieldError(
+                    f"Range min and max must be comparable, got "
+                    f"{type(self.min).__name__} and {type(self.max).__name__}"
+                ) from exc
             if invalid:
-                raise ValueError("Range min must be <= max")
+                raise DataModelFieldError(
+                    f"Range min must be <= max, got min={self.min!r}, max={self.max!r}; "
+                    "equal bounds must both be inclusive"
+                )
 
 
 @_stdlib_dataclass(frozen=True, slots=True)
@@ -155,7 +190,7 @@ class MultipleOf:
 
     def __post_init__(self) -> None:
         if self.value == 0:
-            raise ValueError("MultipleOf.value must not be 0")
+            raise DataModelFieldError("MultipleOf.value must not be 0")
 
 
 @_stdlib_dataclass(frozen=True, slots=True)
@@ -242,12 +277,12 @@ class _ModelAccessor:
 
     def _require_instance(self) -> Any:
         if self._inst is None:
-            raise TypeError("This model operation requires a model instance")
+            raise DataModelUsageError("This model operation requires a model instance")
         return self._inst
 
     def _require_model_class(self) -> type:
         if self._model_class is None:
-            raise TypeError("This model operation requires a model class")
+            raise DataModelUsageError("This model operation requires a model class")
         return self._model_class
 
     def dump(self) -> dict[str, Any]:
@@ -364,7 +399,12 @@ class _DataModelMeta(type):
 
         dataclass_kwargs = dict(kwargs)
         dataclass_kwargs["slots"] = True
-        model_class = _stdlib_dataclass(cls, **dataclass_kwargs)
+        try:
+            model_class = _stdlib_dataclass(cls, **dataclass_kwargs)
+        except (TypeError, ValueError) as exc:
+            raise DataModelDefinitionError(
+                f"{name} DataModel dataclass(slots=True) build failed: {exc}"
+            ) from exc
         setattr(model_class, _DATA_MODEL_ATTR, True)
         _warm_data_model_class(model_class)
         return model_class
@@ -386,16 +426,20 @@ def _validate_data_model_namespace(
 ) -> None:
     unknown = tuple(key for key in kwargs if key not in _DATA_MODEL_DATACLASS_KWARGS)
     if unknown:
-        raise TypeError(f"{name} got unsupported DataModel option(s): {', '.join(unknown)}")
+        raise DataModelDefinitionError(
+            f"{name} got unsupported DataModel option(s): {', '.join(unknown)}"
+        )
     if kwargs.get("slots", True) is not True:
-        raise TypeError(f"{name} must use slots=True")
+        raise DataModelDefinitionError(f"{name} must use slots=True")
     if "__slots__" in namespace:
-        raise TypeError(f"{name} must not define __slots__; DataModel always uses slots=True")
+        raise DataModelDefinitionError(
+            f"{name} must not define __slots__; DataModel always uses slots=True"
+        )
     if len(bases) != 1:
-        raise TypeError(f"{name} supports only single DataModel inheritance")
+        raise DataModelDefinitionError(f"{name} supports only single DataModel inheritance")
     annotations = namespace.get("__annotations__", {})
     if "model" in namespace or "model" in annotations:
-        raise TypeError(f"{name}.model is reserved for DataModel helpers")
+        raise DataModelDefinitionError(f"{name}.model is reserved for DataModel helpers")
 
 
 def _warm_data_model_class(model_class: type) -> None:
@@ -458,7 +502,7 @@ def model_kind(value: Any) -> str:
         return "pydantic"
     if is_dataclass_model_type(model_type):
         return "dataclass"
-    raise TypeError(f"Unsupported model type: {model_type!r}")
+    raise DataModelUsageError(f"Unsupported model type: {model_type!r}")
 
 
 def model_schema_kind(value: Any) -> int:
@@ -477,7 +521,7 @@ def _model_schema_kind_for(model_type: type) -> int:
         return MODEL_SCHEMA_KIND_PYDANTIC_BASEMODEL
     if is_dataclass_model_type(model_type):
         return MODEL_SCHEMA_KIND_PYTHON_DATACLASS
-    raise TypeError(f"Unsupported model type: {model_type!r}")
+    raise DataModelUsageError(f"Unsupported model type: {model_type!r}")
 
 
 def model_schema_name(value: Any) -> str:
@@ -491,7 +535,7 @@ def _model_schema_name_for(model_type: type) -> str:
     if isinstance(cached, str):
         return cached
     if not is_model_type(model_type):
-        raise TypeError(f"Unsupported model type: {model_type!r}")
+        raise DataModelUsageError(f"Unsupported model type: {model_type!r}")
     module = getattr(model_type, "__module__", "")
     qualname = getattr(model_type, "__qualname__", model_type.__name__)
     if module and module != "builtins":
@@ -509,7 +553,7 @@ def _data_model_fields_for(model_class: type) -> tuple[tuple[str, Any, Any, Any,
     try:
         type_hints = get_type_hints(model_class, include_extras=True)
     except Exception as exc:
-        raise DataModelValidationError(
+        raise DataModelSchemaError(
             f"Cannot resolve type hints for {model_class.__name__}: {exc}. "
             f"Every annotation must be resolvable at validation time. Forward and "
             f"self references declared at module scope resolve automatically; "
@@ -561,7 +605,7 @@ def model_dump(obj: Any) -> dict[str, Any]:
             field.name: _to_serializable(getattr(obj, field.name))
             for field in _dataclass_fields(obj)
         }
-    raise TypeError(f"Expected model instance, got {type(obj).__name__}")
+    raise DataModelUsageError(f"Expected model instance, got {type(obj).__name__}")
 
 
 def model_validate_instance(obj: Any) -> None:
@@ -579,7 +623,7 @@ def model_validate_dump(obj: Any) -> dict[str, Any]:
             field.name: _to_serializable(getattr(obj, field.name))
             for field in _dataclass_fields(obj)
         }
-    raise TypeError(f"Expected model instance, got {type(obj).__name__}")
+    raise DataModelUsageError(f"Expected model instance, got {type(obj).__name__}")
 
 
 def _dataclass_shallow_dump(obj: Any) -> dict[str, Any]:
@@ -593,7 +637,9 @@ def _dataclass_shallow_dump(obj: Any) -> dict[str, Any]:
 
 def _data_model_validate(model_class: type[_T], obj: Any) -> _T:
     if not isinstance(obj, dict):
-        raise DataModelValidationError(f"{model_class.__name__} expects dict payload")
+        raise DataModelValidationError(
+            f"{model_class.__name__} expects dict payload, got {type(obj).__name__}"
+        )
 
     values: dict[str, Any] = {}
     for name, annotation, default, default_factory, checker, type_name in _data_model_fields_for(model_class):
@@ -604,12 +650,15 @@ def _data_model_validate(model_class: type[_T], obj: Any) -> _T:
         elif default_factory is not MISSING:
             value = default_factory()
         else:
-            raise DataModelValidationError(f"Missing required field '{name}'")
+            raise DataModelValidationError(
+                f"{model_class.__name__}.{name} is required and missing from payload"
+            )
 
         _raise_if_nested_model(name, value)
         if not checker(value):
             raise DataModelValidationError(
-                f"Field '{name}' expected {type_name}, got {type(value).__name__}"
+                f"{model_class.__name__}.{name} expected {type_name}, "
+                f"got {type(value).__name__}"
             )
         values[name] = value
 
@@ -622,7 +671,8 @@ def _data_model_validate_instance(obj: Any) -> None:
         _raise_if_nested_model(name, value)
         if not checker(value):
             raise DataModelValidationError(
-                f"Field '{name}' expected {type_name}, got {type(value).__name__}"
+                f"{type(obj).__name__}.{name} expected {type_name}, "
+                f"got {type(value).__name__}"
             )
 
 
@@ -633,7 +683,8 @@ def _data_model_dump_checked(obj: Any) -> dict[str, Any]:
         _raise_if_nested_model(name, value)
         if not checker(value):
             raise DataModelValidationError(
-                f"Field '{name}' expected {type_name}, got {type(value).__name__}"
+                f"{type(obj).__name__}.{name} expected {type_name}, "
+                f"got {type(value).__name__}"
             )
         data[name] = value
     return data
@@ -908,7 +959,7 @@ def _lt_checker(bound: Any) -> Callable[[Any], bool]:
 
 def _multiple_of_checker(divisor: Any) -> Callable[[Any], bool]:
     if divisor == 0:
-        raise ValueError("MultipleOf.value must not be 0")
+        raise DataModelFieldError("MultipleOf.value must not be 0")
 
     def check(value: Any) -> bool:
         try:
@@ -970,13 +1021,18 @@ def _field_constraints(field: Any) -> tuple[Any, ...]:
 
 def _coalesce_alias(primary_name: str, primary: Any, alias_name: str, alias: Any) -> Any:
     if primary is not None and alias is not None and primary != alias:
-        raise ValueError(f"{primary_name} and {alias_name} cannot differ")
+        raise DataModelFieldError(
+            f"{primary_name} and {alias_name} cannot differ, "
+            f"got {primary_name}={primary!r}, {alias_name}={alias!r}"
+        )
     return primary if primary is not None else alias
 
 
 def _validate_non_negative_int(name: str, value: Any) -> None:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise ValueError(f"{name} must be a non-negative int")
+        raise DataModelFieldError(
+            f"{name} must be a non-negative int, got {type(value).__name__} value={value!r}"
+        )
 
 
 def _validate_length_bounds(
@@ -986,24 +1042,27 @@ def _validate_length_bounds(
     exact: int | None,
 ) -> None:
     if min_value is None and max_value is None and exact is None:
-        raise ValueError(f"{label} requires at least one bound")
+        raise DataModelFieldError(f"{label} requires at least one bound")
     if exact is not None:
         _validate_non_negative_int(f"{label}.exact", exact)
         if min_value is not None or max_value is not None:
-            raise ValueError(f"{label}.exact cannot be combined with min/max")
+            raise DataModelFieldError(f"{label}.exact cannot be combined with min/max")
         return
     if min_value is not None:
         _validate_non_negative_int(f"{label}.min", min_value)
     if max_value is not None:
         _validate_non_negative_int(f"{label}.max", max_value)
     if min_value is not None and max_value is not None and min_value > max_value:
-        raise ValueError(f"{label}.min must be <= max")
+        raise DataModelFieldError(
+            f"{label}.min must be <= max, got min={min_value!r}, max={max_value!r}"
+        )
 
 
 def _raise_if_nested_model(field_name: str, value: Any) -> None:
     if is_model_instance(value):
         raise DataModelValidationError(
-            f"Field '{field_name}' nested model payload is not supported"
+            f"Field '{field_name}' nested model payload is not supported, "
+            f"got {type(value).__name__}"
         )
 
 
