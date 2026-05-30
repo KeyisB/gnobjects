@@ -49,7 +49,7 @@ class Url:
         "hostname", "port", "path", "params", "fragment", "isIp"
     )
 
-    _re_hostport = re.compile(r"^(?P<host>\[[^\]]+\]|[a-zA-Z0-9.~<>\-_@]+)(?::(?P<port>\d+))?$", re.X)
+    _re_hostport = re.compile(r"^(?P<host>\[[^\]]+\]|[a-zA-Z0-9.*~<>\-_@]+)(?::(?P<port>\d+))?$", re.X)
 
     @overload
     def __init__(self): ...
