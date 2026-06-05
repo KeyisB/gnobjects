@@ -15,11 +15,11 @@ gwis_object_types_int_object_id_start: int = 100_000
 gwis_object_types_int_object_id_end: int = 281_474_976_710_656
 
 table_gwis_object_types_int_max_object_id: dict[int, int] = {
-    8: 2 ** 16,
     9: 2 ** 32
 }
 
 table_gwis_object_types_int_ranges: dict[int, tuple[int, int]] = {
+    8: (2000, 3000)
 }
 
 for o, m in table_gwis_object_types_int_max_object_id.items():
@@ -30,18 +30,3 @@ for o, m in table_gwis_object_types_int_max_object_id.items():
     gwis_object_types_int_object_id_start += m
 
 tablex_gwis_object_types_str_to_int = {value: key for key, value in tablex_gwis_object_types_int_to_str.items()}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
