@@ -1457,7 +1457,7 @@ class GNRequest:
         """
         # Создание запроса
 
-        :param method: HTTP-подобный метод запроса (`get`, `post`, `put`, `delete`, ...).
+        :param method: Метод запроса (`get`, `post`, `put`, `del`, `123`, `a1/b2`, ...). Без ограничений.
         :param url: URL запроса в формате `Url`.
         :param payload:
             Полезная нагрузка запроса. Поддерживаются три режима:
@@ -1466,9 +1466,9 @@ class GNRequest:
             - `AsyncIterable[bytes]`: payload будет отправляться потоково по чанкам
             - `None`: запрос без payload
 
-        :param cookies: Словарь cookies/метаданных запроса.
+        :param cookies: Словарь cookies. Неограниченный payload, который всегда передается в header запроса/ответа.
         :param transport: Транспортный протокол запроса.
-        :param route: Route bucket запроса.
+        :param route: Route разграничивает области route на сервере. По умолчанию, в GNServer route: `api`
         :param origin: Origin страницы или источника запроса.
         :param payloadSize:
             Полная длина wire-payload в байтах, если отправитель хочет объявить ее заранее.
@@ -1484,7 +1484,7 @@ class GNRequest:
         """
         self._method: str = method
         self._url = url
-        self._cookies: dict = cookies
+        self._cookies: dict = cookies or {}
         self._transport: str = transport
         self._route: str = route
         self._origin = origin
@@ -2046,7 +2046,10 @@ class GNRequest:
             raise Exception(f'Unsupported GNRequest version: {version}')
 
     @staticmethod
-    def try_deserialize_header(data: bytes) -> Optional[Tuple['GNRequest', int, Optional[int]]]:
+    def try_deserialize_header(
+        header: bytes,
+        payload: TempDataObject | SerializableType | AsyncIterable[bytes] | ModelPayload | None = None
+    ) -> tuple['GNRequest', int, int | None] | None:
         """
         # Попытка разобрать только header запроса
 
@@ -2066,7 +2069,7 @@ class GNRequest:
         Это ключевая точка для раннего запуска обработчика по одному только header.
         """
         try:
-            d, payload_offset = unpack_gnrequest_header(bytes(data))
+            d, payload_offset = unpack_gnrequest_header(bytes(header))
         except IncompleteGNFrameError:
             return None
 
@@ -2077,11 +2080,13 @@ class GNRequest:
             route=d['route'],
             method=d['method'],
             url=Url(d['url'].decode()),
-            payload=TempDataObject(container=None),
+            payload=TempDataObject(container=None) if payload is None else payload,
             cookies=cookies
         )
-        request._tdo = None
-        request.__raw_payload_cache = None
+        if payload is None:
+            request._tdo = None
+            request.__raw_payload_cache = None
+
         request._payload_state = _AsyncPayloadState(
             payload_size=cast(Optional[int], d.get('payload_length', 0)),
             has_payload=bool(d.get('payload_present', False))
@@ -2315,7 +2320,7 @@ class GNRequest:
 
 
     @property
-    def cookies(self) -> dict | None:
+    def cookies(self) -> dict:
         return self._cookies
     
     @cookies.setter
